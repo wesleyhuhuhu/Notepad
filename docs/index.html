@@ -34,7 +34,7 @@ body {
 button, input, select, textarea { font: inherit; color: inherit; }
 button {
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 6px 12px; cursor: pointer;
+  padding: 6px 12px; cursor: pointer; white-space: nowrap;
 }
 button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
@@ -44,12 +44,15 @@ header {
   display: flex; align-items: center; gap: 10px; padding: 10px 16px;
   border-bottom: 1px solid var(--border); background: var(--panel);
 }
-header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-.status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-width: 0; }
+header h1 { font-size: 16px; margin: 0; font-weight: 600; white-space: nowrap; }
+#project {
+  min-width: 0; max-width: 240px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); font-weight: 600;
+}
+.status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-width: 0; flex: 1; }
 .status span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
-header .spacer { flex: 1; }
 header .actions { display: flex; gap: 6px; }
 
 .layout { flex: 1; display: flex; min-height: 0; }
@@ -73,24 +76,28 @@ header .actions { display: flex; gap: 6px; }
 details.reasoning { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 details.reasoning summary { cursor: pointer; user-select: none; }
 details.reasoning div { white-space: pre-wrap; border-left: 2px solid var(--border); padding-left: 10px; margin-top: 6px; max-height: 300px; overflow-y: auto; }
+.tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .tool {
   display: inline-flex; align-items: center; gap: 6px; background: var(--chip); border: 1px solid var(--border);
-  border-radius: 999px; padding: 2px 10px; font-size: 12.5px; color: var(--muted); margin: 0 6px 8px 0;
+  border-radius: 999px; padding: 2px 10px; font-size: 12.5px; color: var(--muted); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tool.ok::before { content: "✓"; color: var(--ok); }
 .tool.bad::before { content: "✕"; color: var(--bad); }
 .tool.pending::before { content: "…"; }
 .err { color: var(--bad); font-size: 14px; }
+.notice { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 8px; }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--muted); }
 @keyframes blink { 50% { opacity: 0; } }
 
-.empty { text-align: center; color: var(--muted); margin-top: 12vh; }
+.empty { text-align: center; color: var(--muted); margin-top: 10vh; }
 .empty h2 { color: var(--text); font-weight: 600; font-size: 20px; margin-bottom: 6px; }
+.empty .cta { margin-top: 16px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 
 .composer { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
 .composer .inner { display: flex; gap: 8px; align-items: flex-end; }
 #input {
-  flex: 1; resize: none; max-height: 200px; min-height: 42px; padding: 9px 12px;
+  flex: 1; resize: none; max-height: 200px; min-height: 42px; padding: 9px 12px; overflow-y: hidden;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); outline: none;
 }
 #input:focus { border-color: var(--accent); }
@@ -100,20 +107,24 @@ details.reasoning div { white-space: pre-wrap; border-left: 2px solid var(--bord
 .composer select { background: transparent; border: none; color: var(--muted); max-width: 260px; padding: 0; }
 
 aside#mdpanel {
-  width: 440px; max-width: 100%; border-left: 1px solid var(--border); background: var(--panel);
+  width: 460px; max-width: 100%; border-left: 1px solid var(--border); background: var(--panel);
   display: none; flex-direction: column; min-height: 0;
 }
 aside#mdpanel.open { display: flex; }
 .md-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-.md-head strong { flex: 1; }
+.md-head .seg { display: flex; flex: 1; min-width: 0; }
+.seg button { border-radius: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.seg button:first-child { border-radius: 8px 0 0 8px; }
+.seg button:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); position: relative; }
 .md-path { font-size: 12px; color: var(--muted); padding: 6px 14px 0; font-family: var(--mono); overflow-wrap: anywhere; }
 #mdtext {
   flex: 1; margin: 10px 14px; resize: none; border: 1px solid var(--border); border-radius: 8px;
   padding: 10px; background: var(--bg); font-family: var(--mono); font-size: 13px; line-height: 1.5; outline: none;
 }
 #mdtext:focus { border-color: var(--accent); }
-.md-foot { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; }
-.md-foot .note { flex: 1; font-size: 12.5px; color: var(--muted); }
+.md-foot { display: flex; gap: 8px; align-items: center; padding: 0 14px 14px; flex-wrap: wrap; }
+.md-foot .note { flex: 1 1 160px; font-size: 12.5px; color: var(--muted); }
 @media (max-width: 860px) {
   aside#mdpanel.open { position: fixed; inset: 0; width: auto; z-index: 20; border: none; }
 }
@@ -130,10 +141,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
 }
 .field .hint { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
-.row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.field.check label { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+.row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
 .row .grow { flex: 1; font-size: 13px; }
-@media (max-width: 520px) {
+@media (max-width: 600px) {
+  header { flex-wrap: wrap; row-gap: 8px; }
   header h1 { display: none; }
+  #project { flex: 1; max-width: none; }
+  .status { order: 3; flex-basis: 100%; }
   header .actions button { padding: 6px 9px; }
 }
 </style>
@@ -141,11 +156,11 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 <body>
 <header>
   <h1>Local LLM</h1>
+  <select id="project" title="Project"><option value="">No project</option></select>
   <div class="status" title="Bridge status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
-  <div class="spacer"></div>
   <div class="actions">
     <button id="btnMd" title="View and edit CLAUDE.md">CLAUDE.md</button>
-    <button id="btnNew" title="Start a new chat">New</button>
+    <button id="btnNew" title="Clear this chat">New chat</button>
     <button id="btnSettings" title="Settings">Settings</button>
   </div>
 </header>
@@ -160,25 +175,49 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       </div>
       <div class="inner meta">
         <label title="Model to use">Model <select id="model"><option value="">(default)</option></select></label>
-        <label title="Let the model change CLAUDE.md with tools"><input type="checkbox" id="allowEdits" checked> Model can edit CLAUDE.md</label>
+        <label title="Let the model change CLAUDE.md files with tools"><input type="checkbox" id="allowEdits" checked> Model can edit CLAUDE.md</label>
       </div>
     </div>
   </div>
 
   <aside id="mdpanel" aria-label="CLAUDE.md editor">
     <div class="md-head">
-      <strong>CLAUDE.md</strong>
+      <div class="seg" role="group" aria-label="Which CLAUDE.md">
+        <button id="segProject" aria-pressed="true">Project</button>
+        <button id="segGlobal" aria-pressed="false">Global</button>
+      </div>
       <button id="mdReload">Reload</button>
       <button id="mdClose">Close</button>
     </div>
     <div class="md-path" id="mdPath"></div>
-    <textarea id="mdtext" spellcheck="false" placeholder="CLAUDE.md is empty. Write standing instructions or notes here."></textarea>
+    <textarea id="mdtext" spellcheck="false"></textarea>
     <div class="md-foot">
       <span class="note" id="mdNote"></span>
+      <button id="mdGenerate" title="Have the model read the project and write its CLAUDE.md">Generate from code</button>
       <button id="mdSave" class="primary">Save</button>
     </div>
   </aside>
 </div>
+
+<dialog id="newProject">
+  <form method="dialog" id="newProjectForm">
+    <h2>New project</h2>
+    <div class="field">
+      <label for="npName">Name</label>
+      <input type="text" id="npName" maxlength="80" placeholder="e.g. Weather App" autocomplete="off" required>
+      <div class="hint" id="npWhere">Creates a folder with a starter CLAUDE.md on your PC.</div>
+    </div>
+    <div class="field">
+      <label for="npDesc">What is it? (optional)</label>
+      <textarea id="npDesc" rows="3" placeholder="One or two sentences. Goes in the Overview section of its CLAUDE.md."></textarea>
+    </div>
+    <div class="row">
+      <span class="grow err" id="npResult"></span>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button type="button" class="primary" id="npCreate">Create</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="settings">
   <form method="dialog" id="settingsForm">
@@ -196,7 +235,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     <div class="field">
       <label for="sSystem">Extra system prompt (optional)</label>
       <textarea id="sSystem" rows="3"></textarea>
-      <div class="hint">Added after CLAUDE.md. Use CLAUDE.md for anything you want kept on the PC.</div>
+      <div class="hint">Added after the CLAUDE.md files. Use CLAUDE.md for anything you want kept on the PC.</div>
     </div>
     <div class="field">
       <label for="sTheme">Theme</label>
@@ -219,6 +258,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     get(k, d) { try { const v = localStorage.getItem('llm.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
     set(k, v) { try { localStorage.setItem('llm.' + k, JSON.stringify(v)); } catch {} },
   };
+  const NEW_PROJECT = '__new__';
 
   // One-click setup: index.html#bridge=<url>&token=<token>
   function consumeHash() {
@@ -231,13 +271,6 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     return true;
   }
   consumeHash();
-  window.addEventListener('hashchange', () => {
-    if (!consumeHash()) return;
-    settings.bridgeUrl = store.get('bridgeUrl', '');
-    settings.token = store.get('token', '');
-    if ($('settings').open) $('settings').close('cancel');
-    refreshStatus();
-  });
 
   let settings = {
     bridgeUrl: store.get('bridgeUrl', ''),
@@ -245,8 +278,20 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     system: store.get('system', ''),
     theme: store.get('theme', ''),
   };
-  let messages = store.get('messages', []);
+  let project = store.get('project', '');
+  let projects = [];
+  let status = null;
+  let messages = [];
   let busy = null; // AbortController while streaming
+  let mdScope = 'project';
+
+  window.addEventListener('hashchange', () => {
+    if (!consumeHash()) return;
+    settings.bridgeUrl = store.get('bridgeUrl', '');
+    settings.token = store.get('token', '');
+    if ($('settings').open) $('settings').close('cancel');
+    connect();
+  });
 
   const applyTheme = () => {
     if (settings.theme) document.documentElement.dataset.theme = settings.theme;
@@ -260,6 +305,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       ...opts,
       headers: { Authorization: 'Bearer ' + settings.token, 'Content-Type': 'application/json', ...(opts.headers || {}) },
     });
+  async function apiJson(path, opts) {
+    const r = await api(path, opts);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Error ' + r.status);
+    return j;
+  }
+  const q = (p) => (p ? '?project=' + encodeURIComponent(p) : '');
+  const historyKey = () => 'messages:' + (project || '');
 
   // ------------------------------------------------------------ status --
   function setStatus(kind, text) {
@@ -273,16 +326,16 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       const r = await api('/api/status');
       if (r.status === 401) { setStatus('bad', 'Wrong access token'); return null; }
       if (!r.ok) { setStatus('bad', 'Bridge error ' + r.status); return null; }
-      const s = await r.json();
-      if (!s.lmStudio.reachable) setStatus('warn', 'PC online, LM Studio off');
+      status = await r.json();
+      if (!status.lmStudio.reachable) setStatus('warn', 'PC online, LM Studio off');
       else {
-        const loaded = s.lmStudio.models.filter((m) => m.loaded);
+        const loaded = status.lmStudio.models.filter((m) => m.loaded);
         setStatus('ok', loaded.length ? loaded.map((m) => m.id).join(', ') : 'Connected (no model loaded)');
       }
-      fillModels(s);
-      $('allowEdits').disabled = !s.allowModelEdits;
-      if (!s.allowModelEdits) $('allowEdits').checked = false;
-      return s;
+      fillModels(status);
+      $('allowEdits').disabled = !status.allowModelEdits;
+      if (!status.allowModelEdits) $('allowEdits').checked = false;
+      return status;
     } catch {
       setStatus('bad', 'PC unreachable');
       return null;
@@ -306,6 +359,59 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     sel.value = [...sel.options].some((o) => o.value === keep) ? keep : '';
   }
 
+  // ---------------------------------------------------------- projects --
+  async function loadProjects() {
+    if (!settings.bridgeUrl || !settings.token) return;
+    try {
+      const j = await apiJson('/api/projects');
+      projects = j.projects;
+      $('npWhere').textContent = `Creates a folder in ${j.root} with a starter CLAUDE.md.`;
+    } catch {
+      projects = [];
+    }
+    fillProjects();
+  }
+
+  function fillProjects() {
+    const sel = $('project');
+    sel.innerHTML = '';
+    const add = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; sel.appendChild(o); };
+    add('', 'No project');
+    for (const p of projects) add(p.name, p.name + (p.hasClaudeMd ? '' : ' (no CLAUDE.md)'));
+    add(NEW_PROJECT, '+ New project…');
+    if (project && !projects.some((p) => p.name === project)) project = '';
+    sel.value = project;
+  }
+
+  function switchProject(name) {
+    if (busy) busy.abort();
+    project = name;
+    mdScope = project ? 'project' : 'global';
+    store.set('project', project);
+    $('project').value = project;
+    messages = store.get(historyKey(), []);
+    render();
+    updateMdControls();
+    if ($('mdpanel').classList.contains('open')) loadMd();
+  }
+
+  async function createProject() {
+    const name = $('npName').value.trim();
+    if (!name) { $('npResult').textContent = 'Enter a name.'; return; }
+    $('npCreate').disabled = true;
+    $('npResult').textContent = '';
+    try {
+      await apiJson('/api/projects', { method: 'POST', body: JSON.stringify({ name, description: $('npDesc').value }) });
+      $('newProject').close('created');
+      await loadProjects();
+      switchProject(name);
+    } catch (e) {
+      $('npResult').textContent = e.message;
+    } finally {
+      $('npCreate').disabled = false;
+    }
+  }
+
   // ------------------------------------------------------------ render --
   function splitThink(text) {
     let reasoning = '';
@@ -318,17 +424,28 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   const md = (t) => DOMPurify.sanitize(marked.parse(t || '', { gfm: true, breaks: true }));
 
   function toolLabel(t) {
-    const names = {
-      read_claude_md: 'Read CLAUDE.md', append_to_claude_md: 'Added to CLAUDE.md',
-      replace_in_claude_md: 'Edited CLAUDE.md', write_claude_md: 'Rewrote CLAUDE.md',
-    };
-    return names[t.name] || t.name;
+    const g = t.args && t.args.scope === 'global' ? ' (global)' : '';
+    switch (t.name) {
+      case 'read_claude_md': return 'Read CLAUDE.md' + g;
+      case 'append_to_claude_md': return 'Added to CLAUDE.md' + g;
+      case 'replace_in_claude_md': return 'Edited CLAUDE.md' + g;
+      case 'write_claude_md': return 'Wrote CLAUDE.md' + g;
+      case 'list_project_files': return 'Listed ' + ((t.args && t.args.path) || 'project files');
+      case 'read_project_file': return 'Read ' + ((t.args && t.args.path) || 'a file');
+      default: return t.name;
+    }
   }
 
   function renderAssistant(el, m, streaming) {
     const { reasoning: inlineR, content } = splitThink(m.content || '');
     const reasoning = [m.reasoning || '', inlineR].filter(Boolean).join('\n').trim();
     el.innerHTML = '';
+    if (streaming && m.notice) {
+      const n = document.createElement('div');
+      n.className = 'notice';
+      n.textContent = m.notice;
+      el.appendChild(n);
+    }
     if (reasoning) {
       const d = document.createElement('details');
       d.className = 'reasoning';
@@ -342,6 +459,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
     if (m.tools && m.tools.length) {
       const wrap = document.createElement('div');
+      wrap.className = 'tools';
       for (const t of m.tools) {
         const c = document.createElement('span');
         c.className = 'tool ' + (t.ok === undefined ? 'pending' : t.ok ? 'ok' : 'bad');
@@ -367,7 +485,28 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const list = $('list');
     list.innerHTML = '';
     if (!messages.length) {
-      list.innerHTML = '<div class="empty"><h2>Your model, from anywhere</h2><p>Messages go to LM Studio on your PC. It reads CLAUDE.md on every turn and can update it when you ask it to remember something.</p></div>';
+      const p = projects.find((x) => x.name === project);
+      const div = document.createElement('div');
+      div.className = 'empty';
+      if (project) {
+        div.innerHTML = '<h2></h2><p></p><div class="cta"></div>';
+        div.querySelector('h2').textContent = project;
+        div.querySelector('p').textContent = p && !p.hasClaudeMd
+          ? "This project doesn't have a CLAUDE.md yet. The model can read the code and write one."
+          : "The model reads this project's CLAUDE.md and the global one on every message, and can look at the project's files.";
+        const cta = div.querySelector('.cta');
+        const gen = document.createElement('button');
+        gen.className = p && !p.hasClaudeMd ? 'primary' : '';
+        gen.textContent = p && !p.hasClaudeMd ? 'Generate CLAUDE.md from code' : 'Refresh CLAUDE.md from code';
+        gen.onclick = generateMd;
+        const open = document.createElement('button');
+        open.textContent = 'Open CLAUDE.md';
+        open.onclick = () => openPanel('project');
+        cta.append(gen, open);
+      } else {
+        div.innerHTML = '<h2>Your model, from anywhere</h2><p>Pick a project at the top to give the model that project\'s CLAUDE.md and code, or just chat. The global CLAUDE.md is always included.</p>';
+      }
+      list.appendChild(div);
       return;
     }
     for (const m of messages) list.appendChild(msgEl(m));
@@ -391,23 +530,25 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     if (force || box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
   }
 
-  const save = () => store.set('messages', messages.slice(-100));
+  const save = (key, msgs) => store.set(key, msgs.slice(-100));
 
   // -------------------------------------------------------------- chat --
-  async function send() {
+  async function send(textOverride) {
     if (busy) { busy.abort(); return; }
-    const text = $('input').value.trim();
+    const text = (typeof textOverride === 'string' ? textOverride : $('input').value).trim();
     if (!text) return;
     if (!settings.bridgeUrl || !settings.token) { openSettings(); return; }
 
-    $('input').value = '';
-    autosize();
-    if (!messages.length) $('list').innerHTML = '';
+    if (typeof textOverride !== 'string') { $('input').value = ''; autosize(); }
+    const chatProject = project;
+    const chatKey = historyKey();
+    const chat = messages;
+    if (!chat.length) $('list').innerHTML = '';
     const user = { role: 'user', content: text };
-    messages.push(user);
+    chat.push(user);
     $('list').appendChild(msgEl(user));
     const a = { role: 'assistant', content: '', reasoning: '', tools: [] };
-    messages.push(a);
+    chat.push(a);
     const el = msgEl(a, true);
     $('list').appendChild(el);
     scrollDown(true);
@@ -418,12 +559,13 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const paint = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderAssistant(el, a, true); scrollDown(); }); };
 
     try {
-      const history = messages.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
+      const history = chat.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
       const r = await api('/api/chat', {
         method: 'POST',
         signal: busy.signal,
         body: JSON.stringify({
           messages: history,
+          project: chatProject || undefined,
           model: $('model').value || undefined,
           allowEdits: $('allowEdits').checked,
           system: settings.system || undefined,
@@ -462,7 +604,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       if (frame) cancelAnimationFrame(frame), frame = 0;
       renderAssistant(el, a, false);
       scrollDown();
-      save();
+      save(chatKey, chat);
     }
   }
 
@@ -471,35 +613,70 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       case 'token': a.content += ev.text; break;
       case 'reasoning': a.reasoning += ev.text; break;
       case 'round_end':
-        // Text streamed before a tool call is usually preamble; keep it but separate it.
         if (a.content && !a.content.endsWith('\n\n')) a.content += '\n\n';
         break;
-      case 'tool_call': a.tools.push({ id: ev.id, name: ev.name }); break;
+      case 'tool_call': a.tools.push({ id: ev.id, name: ev.name, args: ev.args }); break;
       case 'tool_result': {
         const t = a.tools.find((x) => x.id === ev.id) || {};
         t.ok = ev.ok; t.result = ev.result;
         break;
       }
-      case 'claude_md_updated': if ($('mdpanel').classList.contains('open')) loadMd(true); break;
+      case 'claude_md_updated':
+        if (ev.scope === 'project') {
+          const p = projects.find((x) => x.name === ev.project);
+          if (p && !p.hasClaudeMd) { p.hasClaudeMd = true; fillProjects(); }
+        }
+        if ($('mdpanel').classList.contains('open') && ev.scope === mdScope) loadMd(true);
+        break;
+      case 'status': a.notice = ev.text; break;
       case 'error': a.error = ev.message; break;
     }
   }
 
+  function generateMd() {
+    if (!project) return;
+    if (!$('allowEdits').checked) { $('allowEdits').checked = true; store.set('allowEdits', true); }
+    send('Look through this project\'s files (README, config and main source files) and write its CLAUDE.md with write_claude_md. ' +
+      'Sections: Overview, Tech stack, Structure, Commands (build/run/test), Conventions, Notes. Be concise and only include what the files show. ' +
+      'Keep anything useful that is already in the current CLAUDE.md.');
+  }
+
   // --------------------------------------------------------- CLAUDE.md --
   let mdLoaded = '';
+  const mdTargetProject = () => (mdScope === 'project' ? project : '');
+
+  function updateMdControls() {
+    const hasProject = !!project;
+    if (!hasProject) mdScope = 'global';
+    $('segProject').disabled = !hasProject;
+    $('segProject').textContent = hasProject ? project : 'Project';
+    $('segProject').title = hasProject ? `CLAUDE.md for ${project}` : 'Pick a project first';
+    $('segProject').setAttribute('aria-pressed', String(mdScope === 'project'));
+    $('segGlobal').setAttribute('aria-pressed', String(mdScope === 'global'));
+    $('mdGenerate').style.display = mdScope === 'project' && hasProject && status && status.allowCodeReading ? '' : 'none';
+    $('mdtext').placeholder = mdScope === 'project'
+      ? 'This project has no CLAUDE.md yet. Write one here, or use "Generate from code".'
+      : 'The global CLAUDE.md is empty. Write instructions or notes that apply to every chat.';
+  }
+
+  function openPanel(scope) {
+    if (scope) mdScope = scope;
+    $('mdpanel').classList.add('open');
+    updateMdControls();
+    loadMd();
+  }
+
   async function loadMd(fromModel) {
     if (!settings.bridgeUrl) return;
     const dirty = $('mdtext').value !== mdLoaded;
-    if (fromModel && dirty) { $('mdNote').textContent = 'The model changed CLAUDE.md. Reload to see it (your unsaved edits will be lost).'; return; }
+    if (fromModel && dirty) { $('mdNote').textContent = 'The model changed this file. Reload to see it (your unsaved edits will be lost).'; return; }
     $('mdNote').textContent = 'Loading…';
     try {
-      const r = await api('/api/claude-md');
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Error ' + r.status);
-      const j = await r.json();
+      const j = await apiJson('/api/claude-md' + q(mdTargetProject()));
       mdLoaded = j.content;
       $('mdtext').value = j.content;
       $('mdPath').textContent = j.path;
-      $('mdNote').textContent = fromModel ? 'Updated by the model just now.' : '';
+      $('mdNote').textContent = fromModel ? 'Updated by the model just now.' : j.exists ? '' : 'Not created yet. Save to create it.';
     } catch (e) {
       $('mdNote').textContent = 'Could not load: ' + e.message;
     }
@@ -510,10 +687,13 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     $('mdNote').textContent = 'Saving…';
     try {
       const content = $('mdtext').value;
-      const r = await api('/api/claude-md', { method: 'PUT', body: JSON.stringify({ content }) });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Error ' + r.status);
+      await apiJson('/api/claude-md' + q(mdTargetProject()), { method: 'PUT', body: JSON.stringify({ content }) });
       mdLoaded = content;
-      $('mdNote').textContent = 'Saved. A backup of the old version was kept on your PC.';
+      $('mdNote').textContent = 'Saved. The previous version was backed up on your PC.';
+      if (mdScope === 'project') {
+        const p = projects.find((x) => x.name === project);
+        if (p && !p.hasClaudeMd) { p.hasClaudeMd = true; fillProjects(); }
+      }
     } catch (e) {
       $('mdNote').textContent = 'Save failed: ' + e.message;
     } finally {
@@ -541,7 +721,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     };
     for (const k of Object.keys(settings)) store.set(k, settings[k]);
     applyTheme();
-    refreshStatus();
+    connect();
   });
 
   $('sTest').addEventListener('click', async () => {
@@ -572,30 +752,55 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       send();
     }
   });
-  $('send').addEventListener('click', send);
+  $('send').addEventListener('click', () => send());
   $('btnSettings').addEventListener('click', openSettings);
   $('btnNew').addEventListener('click', () => {
     if (busy) busy.abort();
     messages = [];
-    save();
+    save(historyKey(), messages);
     render();
     $('input').focus();
   });
-  $('btnMd').addEventListener('click', () => {
-    const p = $('mdpanel');
-    p.classList.toggle('open');
-    if (p.classList.contains('open')) loadMd();
+  $('project').addEventListener('change', () => {
+    const v = $('project').value;
+    if (v === NEW_PROJECT) {
+      $('project').value = project;
+      $('npName').value = '';
+      $('npDesc').value = '';
+      $('npResult').textContent = '';
+      $('newProject').showModal();
+      return;
+    }
+    switchProject(v);
   });
+  $('npCreate').addEventListener('click', createProject);
+  $('npName').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); createProject(); } });
+  $('btnMd').addEventListener('click', () => {
+    if ($('mdpanel').classList.contains('open')) $('mdpanel').classList.remove('open');
+    else openPanel(project ? 'project' : 'global');
+  });
+  $('segProject').addEventListener('click', () => { mdScope = 'project'; updateMdControls(); mdLoaded = $('mdtext').value; loadMd(); });
+  $('segGlobal').addEventListener('click', () => { mdScope = 'global'; updateMdControls(); mdLoaded = $('mdtext').value; loadMd(); });
   $('mdClose').addEventListener('click', () => $('mdpanel').classList.remove('open'));
   $('mdReload').addEventListener('click', () => { mdLoaded = $('mdtext').value; loadMd(); });
   $('mdSave').addEventListener('click', saveMd);
+  $('mdGenerate').addEventListener('click', () => { if (window.innerWidth <= 860) $('mdpanel').classList.remove('open'); generateMd(); });
   $('model').addEventListener('change', () => store.set('model', $('model').value));
   $('allowEdits').checked = store.get('allowEdits', true);
   $('allowEdits').addEventListener('change', () => store.set('allowEdits', $('allowEdits').checked));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshStatus(); loadProjects(); } });
 
+  async function connect() {
+    const s = await refreshStatus();
+    await loadProjects();
+    switchProject(project);
+    return s;
+  }
+
+  messages = store.get(historyKey(), []);
   render();
-  refreshStatus().then((s) => { if (!s && (!settings.bridgeUrl || !settings.token)) openSettings(); });
+  updateMdControls();
+  connect().then((s) => { if (!s && (!settings.bridgeUrl || !settings.token)) openSettings(); });
 })();
 </script>
 </body>

@@ -1,6 +1,6 @@
 # Local LLM, from anywhere
 
-Chat with a model running in LM Studio on your PC from a website hosted on GitHub Pages. The model reads `CLAUDE.md` on every message and can update it when you ask it to remember something.
+Chat with a model running in LM Studio on your PC from a website hosted on GitHub Pages. Every project folder gets its own `CLAUDE.md`. The model reads it on every message, can read the project's code (read-only), and can write or update the `CLAUDE.md` for you.
 
 ```
 Phone / laptop browser
@@ -20,19 +20,39 @@ GitHub Pages only serves static files, so the page can't run the model itself. I
 | Path | What it does |
 |---|---|
 | `docs/index.html` | The website. GitHub Pages serves this folder. |
-| `bridge/server.js` | Local server: checks the access token, streams chat from LM Studio, runs the CLAUDE.md tools. No npm install needed (Node 18+). |
+| `bridge/server.js` | Local server: checks the access token, streams chat from LM Studio, manages projects and their CLAUDE.md files, keeps the model loaded with a context that fits your GPU. No npm install needed (Node 18+). |
 | `bridge/config.json` | Your settings and **secret access token**. Created on first run; never committed. |
-| `bridge/backups/` | A copy of `CLAUDE.md` is saved here before every change (last 50 kept). |
-| `CLAUDE.md` | The memory / instructions file. Not committed (it stays on your PC). |
+| `bridge/backups/` | A copy of each CLAUDE.md is saved here before every change (last 50 per file). |
 | `start.ps1` | Starts LM Studio's server, loads the model, turns on Funnel, runs the bridge. |
 
-## How CLAUDE.md works
+## Projects and CLAUDE.md
 
-- Every message, the bridge reads `CLAUDE.md` and puts it in the system prompt.
-- The model has four tools: `read_claude_md`, `append_to_claude_md`, `replace_in_claude_md`, `write_claude_md`. It's told to use them only when you ask it to remember or change something.
-- The website's **CLAUDE.md** button opens an editor so you can read and edit it yourself.
-- Untick **Model can edit CLAUDE.md** under the message box to make it read-only for a chat, or set `"allowModelEdits": false` in `bridge/config.json` to turn edits off entirely.
-- To use a different file (for example Claude Code's global one), set `"claudeMdPath": "~/.claude/CLAUDE.md"` in `bridge/config.json`.
+Projects are the folders inside `projectsRoot` (set to `Documents\Projects`). Each one's memory file is `<project folder>\CLAUDE.md`.
+
+```
+Documents\Projects\
+  CLAUDE.md               ← global: applies to every chat (who you are, how you like answers)
+  Car Scraper\
+    CLAUDE.md             ← this project only: what it is, stack, structure, commands, notes
+  Music Player\
+    CLAUDE.md
+```
+
+- **Pick a project** in the menu at the top of the site. Each project keeps its own chat history in your browser.
+- **New project…** in that menu creates the folder plus a starter CLAUDE.md (Overview, Tech stack, Structure, Commands, Conventions, Notes).
+- **Generate CLAUDE.md from code**: the model lists the project's files, reads the README and main source files, and writes the CLAUDE.md. Use it on existing projects, and again later to refresh it.
+- On every message the model gets the global CLAUDE.md plus the selected project's. Ask it to "remember" something and it decides which file it belongs in (project facts → project file, things about you → global).
+- The **CLAUDE.md** button opens an editor with a project/global switch, so you can read and edit either file yourself.
+- Untick **Model can edit CLAUDE.md** under the message box to make the files read-only for a chat. `"allowModelEdits": false` turns edits off entirely; `"allowCodeReading": false` stops the model reading project code.
+
+What the model can and can't touch:
+- It can **read** files inside the selected project folder only. Paths outside it (`..\`, absolute paths, symlinks out) are refused.
+- It can't read `.env` files, private keys, certificates or similar secret files, and it skips folders like `.git`, `node_modules`, `bin`, `obj` and `venv`.
+- The only files it can **write** are CLAUDE.md files.
+
+## Model loading
+
+LM Studio sometimes unloads the model when idle and then reloads it on demand with a very large context (60k on this PC). That overflows the GPU's 16 GB and slows replies to several seconds per word. To prevent that, the bridge checks before every chat. If the model isn't loaded, or is loaded with more than `contextLength` (16,384) tokens, it unloads and reloads it with that context, fully on the GPU. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
 
 ## One-time setup
 
@@ -78,11 +98,11 @@ To stop public access entirely: `tailscale funnel --https=443 off`.
 
 - On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` with a 16k context fits on the GPU and answers in roughly 10–25 seconds (it thinks first; open **Reasoning** to see it).
 - The `@iq4_xs` file (15.8 GB) won't fit on the GPU with context, so it spills into system RAM and gets very slow.
-- If LM Studio loads a model on its own (just-in-time loading), it may pick a huge context that overflows VRAM and makes replies crawl. Load with `start.ps1` (or `lms load <model> -c 16384`) to avoid that.
+- Generating a CLAUDE.md for a small project takes about a minute. The 16k context means the model reads a handful of key files, not a whole large codebase.
 
 ## Security
 
-- Anyone with the bridge URL **and** the token can use your model and edit `CLAUDE.md`. Keep the token private. To change it, delete `accessToken` from `bridge/config.json` and restart; a new one is generated.
+- Anyone with the bridge URL **and** the token can use your model, read the code in your project folders (through the model), create project folders, and edit CLAUDE.md files. Keep the token private. To change it, delete `accessToken` from `bridge/config.json` and restart; a new one is generated.
 - The bridge only listens on `127.0.0.1`; the internet reaches it only through Funnel.
 - After 10 wrong tokens from one address, that address is locked out for 15 minutes.
 - The token is saved in your browser's local storage for the site. Use **Settings** to clear it on shared computers.

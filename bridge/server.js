@@ -6,14 +6,16 @@
  *  - Requires a bearer token on every /api request.
  *  - Adds CORS headers so the GitHub Pages site can call it.
  *  - Streams chat completions from LM Studio back to the browser.
- *  - Gives the model tools to read and update CLAUDE.md, and injects the
- *    current CLAUDE.md into the system prompt on every request.
+ *  - Projects: every folder in `projectsRoot` is a project with its own CLAUDE.md.
+ *    The model sees the global CLAUDE.md plus the selected project's CLAUDE.md,
+ *    can update either with tools, and can read (never write) the project's code.
  *
  * No npm dependencies. Requires Node 18+.
  */
 'use strict';
 
 const http = require('http');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
@@ -29,12 +31,23 @@ const DEFAULTS = {
   lmStudioUrl: 'http://127.0.0.1:1234',
   model: '',
   claudeMdPath: '../CLAUDE.md',
+  projectsRoot: '',
   allowedOrigins: ['*'],
   allowModelEdits: true,
-  maxToolRounds: 6,
+  allowCodeReading: true,
+  maxToolRounds: 12,
   maxBackups: 50,
+  // The bridge loads the model itself with this context length (tokens). LM Studio's
+  // on-demand loading otherwise picks a huge context that overflows GPU memory.
+  // Set to 0 to leave model loading entirely to LM Studio.
+  contextLength: 16384,
   accessToken: '',
 };
+
+function expandPath(p) {
+  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+  return path.resolve(__dirname, p);
+}
 
 function loadConfig() {
   let fileCfg = {};
@@ -51,11 +64,11 @@ function loadConfig() {
   if (process.env.BRIDGE_PORT) cfg.port = Number(process.env.BRIDGE_PORT);
   if (process.env.LMSTUDIO_URL) cfg.lmStudioUrl = process.env.LMSTUDIO_URL;
   if (process.env.CLAUDE_MD_PATH) cfg.claudeMdPath = process.env.CLAUDE_MD_PATH;
+  if (process.env.PROJECTS_ROOT) cfg.projectsRoot = process.env.PROJECTS_ROOT;
   if (process.env.BRIDGE_MODEL) cfg.model = process.env.BRIDGE_MODEL;
 
-  let p = cfg.claudeMdPath;
-  if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
-  cfg.claudeMdAbs = path.resolve(__dirname, p);
+  cfg.claudeMdAbs = expandPath(cfg.claudeMdPath);
+  cfg.projectsRootAbs = cfg.projectsRoot ? expandPath(cfg.projectsRoot) : '';
   cfg.backupDir = path.join(__dirname, 'backups');
   cfg.lmStudioUrl = cfg.lmStudioUrl.replace(/\/+$/, '');
   return cfg;
@@ -63,7 +76,180 @@ function loadConfig() {
 
 const cfg = loadConfig();
 
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+// ------------------------------------------------------------- projects ---
+
+const IGNORED_DIRS = new Set([
+  '.git', '.svn', '.hg', 'node_modules', '__pycache__', '.vs', '.vscode', '.idea', 'bin', 'obj',
+  'dist', 'build', 'out', 'target', 'venv', '.venv', '.next', '.cache', 'coverage', '.pytest_cache',
+  '.mypy_cache', '.gradle', 'packages',
+]);
+// Files the model is never allowed to read, even inside a project.
+const SECRET_FILE_RE =
+  /^\.env(\..*)?$|\.(pem|key|pfx|p12|keystore|jks|kdbx|publishsettings)$|^id_(rsa|dsa|ecdsa|ed25519)|^credentials(\.json)?$|^secrets?\.(json|ya?ml|toml|ini)$|^\.npmrc$|^\.pypirc$|^\.netrc$/i;
+const RESERVED_WIN = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
+
+function validProjectName(name) {
+  return (
+    typeof name === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9 _.\-()]{0,79}$/.test(name) &&
+    !/[. ]$/.test(name) &&
+    !RESERVED_WIN.test(name)
+  );
+}
+
+function requireProjectsRoot() {
+  if (!cfg.projectsRootAbs) throw httpError(400, 'No projectsRoot is set in bridge/config.json.');
+}
+
+async function listProjects() {
+  requireProjectsRoot();
+  await fsp.mkdir(cfg.projectsRootAbs, { recursive: true });
+  const entries = await fsp.readdir(cfg.projectsRootAbs, { withFileTypes: true });
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || !validProjectName(e.name) || IGNORED_DIRS.has(e.name)) continue;
+    const md = path.join(cfg.projectsRootAbs, e.name, 'CLAUDE.md');
+    const st = await fsp.stat(md).catch(() => null);
+    out.push({ name: e.name, hasClaudeMd: !!st, claudeMdModified: st ? st.mtime.toISOString() : null });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+
+async function getProjectDir(name) {
+  requireProjectsRoot();
+  if (!validProjectName(name)) throw httpError(400, 'Invalid project name.');
+  const dir = path.join(cfg.projectsRootAbs, name);
+  const st = await fsp.stat(dir).catch(() => null);
+  if (!st || !st.isDirectory()) throw httpError(404, `Project "${name}" not found.`);
+  return dir;
+}
+
+function projectTemplate(name, description) {
+  return [
+    `# ${name}`,
+    '',
+    '## Overview',
+    description && description.trim() ? description.trim() : '_What this project is and what it is for._',
+    '',
+    '## Tech stack',
+    '',
+    '## Structure',
+    '',
+    '## Commands',
+    '_How to build, run and test._',
+    '',
+    '## Conventions',
+    '',
+    '## Notes',
+    '',
+  ].join('\n');
+}
+
+async function createProject(name, description) {
+  requireProjectsRoot();
+  if (!validProjectName(name))
+    throw httpError(400, 'Use letters, numbers, spaces, dots, dashes, underscores or parentheses (max 80 characters).');
+  const dir = path.join(cfg.projectsRootAbs, name);
+  if (await fsp.stat(dir).catch(() => null)) throw httpError(409, `A folder named "${name}" already exists.`);
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(path.join(dir, 'CLAUDE.md'), projectTemplate(name, description), 'utf8');
+  log(`Created project "${name}"`);
+  return { name, path: dir };
+}
+
+// Resolve a path inside a project, refusing anything that escapes it (including via symlinks).
+async function resolveInProject(dir, rel) {
+  if (typeof rel !== 'string') rel = '';
+  rel = rel.replace(/^[\\/]+/, '');
+  const realBase = await fsp.realpath(dir);
+  let real;
+  try {
+    real = await fsp.realpath(path.resolve(realBase, rel || '.'));
+  } catch (e) {
+    if (e.code === 'ENOENT') throw new Error(`"${rel}" does not exist in the project.`);
+    throw e;
+  }
+  if (real !== realBase && !real.startsWith(realBase + path.sep)) throw new Error('That path is outside the project.');
+  return { real, base: realBase };
+}
+
+function fmtSize(n) {
+  return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+}
+
+async function listProjectFiles(dir, sub) {
+  const { real, base } = await resolveInProject(dir, sub);
+  const lines = [];
+  const LIMIT = 250;
+  let truncated = false;
+  async function walk(abs, depth) {
+    if (truncated) return;
+    let entries = await fsp.readdir(abs, { withFileTypes: true }).catch(() => []);
+    entries.sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1));
+    for (const e of entries) {
+      if (lines.length >= LIMIT) {
+        truncated = true;
+        return;
+      }
+      const rel = path.relative(base, path.join(abs, e.name)).split(path.sep).join('/');
+      if (e.isDirectory()) {
+        if (IGNORED_DIRS.has(e.name)) {
+          lines.push(`${rel}/ (skipped)`);
+          continue;
+        }
+        lines.push(`${rel}/`);
+        if (depth < 4) await walk(path.join(abs, e.name), depth + 1);
+      } else if (e.isFile()) {
+        const st = await fsp.stat(path.join(abs, e.name)).catch(() => null);
+        lines.push(`${rel}${st ? ` (${fmtSize(st.size)})` : ''}${SECRET_FILE_RE.test(e.name) ? ' [secret, not readable]' : ''}`);
+      }
+    }
+  }
+  await walk(real, 0);
+  if (!lines.length) return '(empty folder)';
+  return lines.join('\n') + (truncated ? `\n[...stopped at ${LIMIT} entries; list a subfolder to see more]` : '');
+}
+
+const READ_CHARS = 6000;
+
+async function readProjectFile(dir, rel, startLine) {
+  if (!rel) throw new Error('path is required.');
+  const { real } = await resolveInProject(dir, rel);
+  if (SECRET_FILE_RE.test(path.basename(real))) throw new Error('That file may contain secrets and cannot be read.');
+  const st = await fsp.stat(real);
+  if (st.isDirectory()) throw new Error('That is a folder. Use list_project_files.');
+  if (st.size > 2 * 1024 * 1024) throw new Error(`File is too large to read (${fmtSize(st.size)}).`);
+  const buf = await fsp.readFile(real);
+  if (buf.subarray(0, 8000).includes(0)) return `(binary file, ${fmtSize(st.size)})`;
+  const all = buf.toString('utf8').split(/\r?\n/);
+  const start = Math.max(1, Number.isInteger(startLine) ? startLine : 1);
+  let out = '';
+  let i = start - 1;
+  for (; i < all.length; i++) {
+    const line = `${i + 1}: ${all[i]}\n`;
+    if (out.length + line.length > READ_CHARS && out) break;
+    out += line;
+  }
+  if (i < all.length) out += `[...file continues, ${all.length} lines total; call again with start_line=${i + 1}]`;
+  return out || '(empty file)';
+}
+
 // ------------------------------------------------------------ CLAUDE.md ---
+
+// A "target" is one CLAUDE.md file: the global one, or a project's.
+async function mdTarget(project) {
+  if (!project) return { file: cfg.claudeMdAbs, label: 'global', name: 'global CLAUDE.md' };
+  const dir = await getProjectDir(project);
+  return {
+    file: path.join(dir, 'CLAUDE.md'),
+    label: 'project-' + project.replace(/[^A-Za-z0-9_.-]/g, '_'),
+    name: `CLAUDE.md for project "${project}"`,
+  };
+}
 
 let writeLock = Promise.resolve();
 function withWriteLock(fn) {
@@ -72,126 +258,135 @@ function withWriteLock(fn) {
   return run;
 }
 
-async function readClaudeMd() {
+async function readMd(target) {
   try {
-    return await fsp.readFile(cfg.claudeMdAbs, 'utf8');
+    return await fsp.readFile(target.file, 'utf8');
   } catch (e) {
-    if (e.code === 'ENOENT') return '';
+    if (e.code === 'ENOENT') return null;
     throw e;
   }
 }
 
-async function backupClaudeMd() {
+async function backupMd(target) {
   let current;
   try {
-    current = await fsp.readFile(cfg.claudeMdAbs);
+    current = await fsp.readFile(target.file);
   } catch (e) {
     if (e.code === 'ENOENT') return;
     throw e;
   }
-  await fsp.mkdir(cfg.backupDir, { recursive: true });
+  const dir = path.join(cfg.backupDir, target.label);
+  await fsp.mkdir(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  await fsp.writeFile(path.join(cfg.backupDir, `CLAUDE.md.${stamp}.bak`), current);
-  const files = (await fsp.readdir(cfg.backupDir)).filter((f) => f.endsWith('.bak')).sort();
+  await fsp.writeFile(path.join(dir, `CLAUDE.md.${stamp}.bak`), current);
+  const files = (await fsp.readdir(dir)).filter((f) => f.endsWith('.bak')).sort();
   for (const f of files.slice(0, Math.max(0, files.length - cfg.maxBackups))) {
-    await fsp.unlink(path.join(cfg.backupDir, f)).catch(() => {});
+    await fsp.unlink(path.join(dir, f)).catch(() => {});
   }
 }
 
-function writeClaudeMd(content, source) {
+function writeMd(target, content, source) {
   return withWriteLock(async () => {
-    await backupClaudeMd();
-    await fsp.mkdir(path.dirname(cfg.claudeMdAbs), { recursive: true });
-    const tmp = cfg.claudeMdAbs + '.tmp';
+    await backupMd(target);
+    await fsp.mkdir(path.dirname(target.file), { recursive: true });
+    const tmp = target.file + '.tmp';
     await fsp.writeFile(tmp, content, 'utf8');
-    await fsp.rename(tmp, cfg.claudeMdAbs);
-    log(`CLAUDE.md updated by ${source} (${content.length} chars)`);
+    await fsp.rename(tmp, target.file);
+    log(`${target.name} updated by ${source} (${content.length} chars)`);
   });
 }
 
 // ---------------------------------------------------------------- tools ---
 
-const READ_TOOL = {
-  type: 'function',
-  function: {
-    name: 'read_claude_md',
-    description: 'Read the full current contents of CLAUDE.md, your persistent memory / instructions file.',
-    parameters: { type: 'object', properties: {}, required: [] },
-  },
-};
-const EDIT_TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'append_to_claude_md',
-      description: 'Append markdown text to the end of CLAUDE.md. Best for adding a new fact, preference or instruction.',
-      parameters: {
-        type: 'object',
-        properties: { text: { type: 'string', description: 'Markdown text to append.' } },
-        required: ['text'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_in_claude_md',
-      description:
-        'Replace one exact snippet of CLAUDE.md with new text. old_text must match the file exactly and appear only once. Pass an empty new_text to delete the snippet.',
-      parameters: {
-        type: 'object',
-        properties: {
-          old_text: { type: 'string', description: 'Exact text currently in CLAUDE.md.' },
+function fn(name, description, properties = {}, required = []) {
+  return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } };
+}
+
+function buildTools({ project, allowEdits, allowCode }) {
+  const scope = project
+    ? {
+        scope: {
+          type: 'string',
+          enum: ['project', 'global'],
+          description: `"project" (default) = the CLAUDE.md of project "${project}". "global" = the CLAUDE.md that applies to every chat.`,
+        },
+      }
+    : {};
+  const tools = [fn('read_claude_md', 'Read the full current contents of a CLAUDE.md file.', { ...scope })];
+  if (allowEdits) {
+    tools.push(
+      fn('append_to_claude_md', 'Append markdown to the end of a CLAUDE.md. Best for adding one new fact, preference or instruction.', {
+        ...scope,
+        text: { type: 'string', description: 'Markdown text to append.' },
+      }, ['text']),
+      fn(
+        'replace_in_claude_md',
+        'Replace one exact snippet of a CLAUDE.md with new text. old_text must match exactly and appear once. Empty new_text deletes it.',
+        {
+          ...scope,
+          old_text: { type: 'string', description: 'Exact text currently in the file.' },
           new_text: { type: 'string', description: 'Replacement text.' },
         },
-        required: ['old_text', 'new_text'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_claude_md',
-      description:
-        'Overwrite ALL of CLAUDE.md with new content. Only for large reorganizations; prefer append_to_claude_md or replace_in_claude_md.',
-      parameters: {
-        type: 'object',
-        properties: { content: { type: 'string', description: 'The complete new file contents.' } },
-        required: ['content'],
-      },
-    },
-  },
-];
+        ['old_text', 'new_text']
+      ),
+      fn('write_claude_md', 'Overwrite an entire CLAUDE.md (creating it if missing). Use when writing it for the first time or reorganizing it.', {
+        ...scope,
+        content: { type: 'string', description: 'The complete new file contents.' },
+      }, ['content'])
+    );
+  }
+  if (project && allowCode) {
+    tools.push(
+      fn('list_project_files', `List files and folders in project "${project}" (read-only).`, {
+        path: { type: 'string', description: 'Subfolder relative to the project root. Omit for the whole project.' },
+      }),
+      fn('read_project_file', `Read a text file in project "${project}" (read-only). Returns numbered lines.`, {
+        path: { type: 'string', description: 'File path relative to the project root, e.g. "src/main.py".' },
+        start_line: { type: 'integer', description: 'Line to start from, for long files. Default 1.' },
+      }, ['path'])
+    );
+  }
+  return tools;
+}
 
-async function runTool(name, args) {
+async function runTool(name, args, ctx) {
+  const target = async () => (ctx.project && args.scope !== 'global' ? ctx.projectTarget : ctx.globalTarget);
   switch (name) {
     case 'read_claude_md': {
-      const md = await readClaudeMd();
-      return { ok: true, changed: false, result: md || '(CLAUDE.md is empty)' };
+      const t = await target();
+      const md = await readMd(t);
+      return { ok: true, result: md === null ? `(${t.name} does not exist yet)` : md || `(${t.name} is empty)` };
     }
     case 'append_to_claude_md': {
       if (typeof args.text !== 'string' || !args.text.trim()) return { ok: false, result: 'Error: text is required.' };
-      const md = await readClaudeMd();
+      const t = await target();
+      const md = (await readMd(t)) || '';
       const sep = md === '' || md.endsWith('\n\n') ? '' : md.endsWith('\n') ? '\n' : '\n\n';
-      await writeClaudeMd(md + sep + args.text.replace(/\s+$/, '') + '\n', 'model (append)');
-      return { ok: true, changed: true, result: 'Appended to CLAUDE.md.' };
+      await writeMd(t, md + sep + args.text.replace(/\s+$/, '') + '\n', 'model (append)');
+      return { ok: true, changed: t, result: `Appended to ${t.name}.` };
     }
     case 'replace_in_claude_md': {
       const { old_text: oldText, new_text: newText } = args;
       if (typeof oldText !== 'string' || !oldText) return { ok: false, result: 'Error: old_text is required.' };
       if (typeof newText !== 'string') return { ok: false, result: 'Error: new_text must be a string.' };
-      const md = await readClaudeMd();
+      const t = await target();
+      const md = (await readMd(t)) || '';
       const count = md.split(oldText).length - 1;
       if (count === 0) return { ok: false, result: 'Error: old_text was not found. Call read_claude_md and copy the text exactly.' };
-      if (count > 1) return { ok: false, result: `Error: old_text appears ${count} times. Include more surrounding text so it is unique.` };
-      await writeClaudeMd(md.replace(oldText, () => newText), 'model (replace)');
-      return { ok: true, changed: true, result: 'Replaced text in CLAUDE.md.' };
+      if (count > 1) return { ok: false, result: `Error: old_text appears ${count} times. Include more surrounding text.` };
+      await writeMd(t, md.replace(oldText, () => newText), 'model (replace)');
+      return { ok: true, changed: t, result: `Replaced text in ${t.name}.` };
     }
     case 'write_claude_md': {
-      if (typeof args.content !== 'string') return { ok: false, result: 'Error: content is required.' };
-      await writeClaudeMd(args.content, 'model (overwrite)');
-      return { ok: true, changed: true, result: 'CLAUDE.md overwritten.' };
+      if (typeof args.content !== 'string' || !args.content.trim()) return { ok: false, result: 'Error: content is required.' };
+      const t = await target();
+      await writeMd(t, args.content.replace(/\s+$/, '') + '\n', 'model (write)');
+      return { ok: true, changed: t, result: `Wrote ${t.name}.` };
     }
+    case 'list_project_files':
+      return { ok: true, result: await listProjectFiles(ctx.projectDir, args.path) };
+    case 'read_project_file':
+      return { ok: true, result: await readProjectFile(ctx.projectDir, args.path, args.start_line) };
     default:
       return { ok: false, result: `Error: unknown tool "${name}".` };
   }
@@ -199,34 +394,53 @@ async function runTool(name, args) {
 
 // -------------------------------------------------------------- prompts ---
 
-const MAX_INLINE_MD = 24000;
+function inline(md, max, missing) {
+  if (md === null) return missing;
+  if (!md.trim()) return '(empty)';
+  if (md.length > max) return md.slice(0, max) + '\n\n[...truncated; call read_claude_md for the full file]';
+  return md;
+}
 
-function buildSystemPrompt(md, extra, allowEdits) {
-  let mdBlock;
-  if (!md.trim()) mdBlock = '(CLAUDE.md is currently empty.)';
-  else if (md.length > MAX_INLINE_MD)
-    mdBlock = md.slice(0, MAX_INLINE_MD) + '\n\n[...truncated; call read_claude_md for the full file]';
-  else mdBlock = md;
-
-  const lines = [
+function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra }) {
+  const L = [
     "You are a helpful assistant running locally on the user's own computer through LM Studio.",
-    'You have a persistent memory and instructions file called CLAUDE.md. Follow the instructions in it.',
-    'Its current contents are:',
-    '<claude_md>',
-    mdBlock,
-    '</claude_md>',
+    'You have memory files called CLAUDE.md. Follow the instructions in them.',
+    '',
+    'Global CLAUDE.md (applies to every chat):',
+    '<global_claude_md>',
+    inline(globalMd, 6000, '(does not exist yet)'),
+    '</global_claude_md>',
   ];
-  if (allowEdits) {
-    lines.push(
-      'You can change CLAUDE.md with the append_to_claude_md, replace_in_claude_md and write_claude_md tools.',
-      'Update it when the user asks you to remember something, change your standing instructions, or edit CLAUDE.md.',
-      'Do not edit it otherwise. After an edit, briefly tell the user what you changed.'
+  if (project) {
+    L.push(
+      '',
+      `The user is working on the project "${project}" (folder: ${projectDir}).`,
+      'Project CLAUDE.md (what this project is, how it is built, conventions, notes):',
+      '<project_claude_md>',
+      inline(projectMd, 10000, '(This project has no CLAUDE.md yet.)'),
+      '</project_claude_md>'
     );
-  } else {
-    lines.push('CLAUDE.md is read-only in this session. If the user asks you to change it, explain that edits are turned off.');
+    if (allowCode)
+      L.push('You can look at the project with list_project_files and read_project_file. You cannot change project files other than CLAUDE.md.');
   }
-  if (extra && typeof extra === 'string' && extra.trim()) lines.push('', extra.trim());
-  return lines.join('\n');
+  L.push('');
+  if (allowEdits) {
+    L.push(
+      'You can change CLAUDE.md files with append_to_claude_md, replace_in_claude_md and write_claude_md.',
+      project
+        ? 'Facts about this project go in the project CLAUDE.md (scope "project"). Facts about the user or instructions for every chat go in the global one (scope "global").'
+        : 'No project is selected, so edits go to the global CLAUDE.md.',
+      'Update a CLAUDE.md when the user asks you to remember something, change standing instructions, or create/update a CLAUDE.md. Do not edit otherwise. After an edit, briefly say what you changed.'
+    );
+    if (project && allowCode)
+      L.push(
+        'When asked to create or refresh the project CLAUDE.md: list the files, read the README and key source/config files, then write a concise CLAUDE.md with sections: Overview, Tech stack, Structure, Commands (build/run/test), Conventions, Notes. Only state what the files support.'
+      );
+  } else {
+    L.push('CLAUDE.md files are read-only in this chat. If asked to change one, explain that edits are turned off.');
+  }
+  if (extra && typeof extra === 'string' && extra.trim()) L.push('', extra.trim());
+  return L.join('\n');
 }
 
 function stripThink(text) {
@@ -238,7 +452,7 @@ function sanitizeHistory(messages) {
   return messages
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
     .map((m) => ({ role: m.role, content: m.role === 'assistant' ? stripThink(m.content) : m.content }))
-    .slice(-60);
+    .slice(-40);
 }
 
 // ------------------------------------------------------- LM Studio call ---
@@ -286,9 +500,9 @@ async function streamCompletion(payload, send, signal) {
         const idx = typeof t.index === 'number' ? t.index : calls.length;
         const c = calls[idx] || (calls[idx] = { id: '', name: '', args: '' });
         if (t.id) c.id = t.id;
-        const fn = t.function || {};
-        if (fn.name && c.name !== fn.name) c.name += fn.name;
-        if (fn.arguments) c.args += fn.arguments;
+        const f = t.function || {};
+        if (f.name && c.name !== f.name) c.name += f.name;
+        if (f.arguments) c.args += f.arguments;
       }
     }
   };
@@ -311,7 +525,20 @@ async function streamCompletion(payload, send, signal) {
 async function handleChat(req, res) {
   const body = await readJson(req);
   const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
-  const tools = allowEdits ? [READ_TOOL, ...EDIT_TOOLS] : [READ_TOOL];
+  const project = typeof body.project === 'string' && body.project ? body.project : null;
+  const allowCode = cfg.allowCodeReading && !!project;
+
+  // Validate the project before switching to a streaming response.
+  let projectDir = null;
+  let projectTarget = null;
+  if (project) {
+    projectDir = await getProjectDir(project);
+    projectTarget = await mdTarget(project);
+  }
+  const globalTarget = await mdTarget(null);
+  const tools = buildTools({ project, allowEdits, allowCode });
+  const ctx = { project, projectDir, projectTarget, globalTarget };
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -329,9 +556,25 @@ async function handleChat(req, res) {
 
   try {
     const model = await resolveModel(body.model);
-    const md = await readClaudeMd();
+    try {
+      if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
+    } catch (e) {
+      log('model load: ' + e.message);
+      send({ type: 'status', text: '' });
+    }
     const messages = [
-      { role: 'system', content: buildSystemPrompt(md, body.system, allowEdits) },
+      {
+        role: 'system',
+        content: buildSystemPrompt({
+          globalMd: await readMd(globalTarget),
+          project,
+          projectDir,
+          projectMd: projectTarget ? await readMd(projectTarget) : null,
+          allowEdits,
+          allowCode,
+          extra: body.system,
+        }),
+      },
       ...sanitizeHistory(body.messages),
     ];
     const extra = {};
@@ -361,17 +604,18 @@ async function handleChat(req, res) {
         let parsed = true;
         try {
           args = c.args ? JSON.parse(c.args) : {};
+          if (!args || typeof args !== 'object') args = {};
         } catch {
           parsed = false;
         }
-        send({ type: 'tool_call', id: c.id, name: c.name, args: parsed ? args : c.args });
+        send({ type: 'tool_call', id: c.id, name: c.name, args: parsed ? summarizeArgs(args) : {} });
         let out;
         if (!parsed) out = { ok: false, result: 'Error: tool arguments were not valid JSON.' };
         else if (!tools.some((t) => t.function.name === c.name))
-          out = { ok: false, result: `Error: tool "${c.name}" is not available (CLAUDE.md edits may be turned off).` };
+          out = { ok: false, result: `Error: tool "${c.name}" is not available in this chat.` };
         else {
           try {
-            out = await runTool(c.name, args);
+            out = await runTool(c.name, args, ctx);
           } catch (e) {
             out = { ok: false, result: 'Error: ' + e.message };
           }
@@ -381,9 +625,10 @@ async function handleChat(req, res) {
           id: c.id,
           name: c.name,
           ok: out.ok,
-          result: out.result.length > 2000 ? out.result.slice(0, 2000) + '…' : out.result,
+          result: out.result.length > 1500 ? out.result.slice(0, 1500) + '…' : out.result,
         });
-        if (out.changed) send({ type: 'claude_md_updated' });
+        if (out.changed)
+          send({ type: 'claude_md_updated', scope: out.changed === projectTarget ? 'project' : 'global', project });
         messages.push({ role: 'tool', tool_call_id: c.id, content: out.result });
       }
       send({ type: 'round_end' });
@@ -400,8 +645,16 @@ async function handleChat(req, res) {
   }
 }
 
+// Only short, non-content args go back to the browser (for the tool chips).
+function summarizeArgs(args) {
+  const out = {};
+  if (typeof args.scope === 'string') out.scope = args.scope;
+  if (typeof args.path === 'string') out.path = args.path.slice(0, 200);
+  if (Number.isInteger(args.start_line)) out.start_line = args.start_line;
+  return out;
+}
+
 async function handleStatus(res) {
-  const md = await readClaudeMd();
   let lmStudio = { reachable: false, models: [] };
   try {
     lmStudio = { reachable: true, models: await listModels() };
@@ -413,7 +666,9 @@ async function handleStatus(res) {
     lmStudio,
     defaultModel: cfg.model || null,
     allowModelEdits: cfg.allowModelEdits,
-    claudeMd: { path: cfg.claudeMdAbs, chars: md.length },
+    allowCodeReading: cfg.allowCodeReading,
+    projectsRoot: cfg.projectsRootAbs || null,
+    globalClaudeMd: cfg.claudeMdAbs,
   });
 }
 
@@ -430,11 +685,51 @@ async function resolveModel(requested) {
   return undefined;
 }
 
+// ------------------------------------------------------- model loading ---
+
+const LMS_BIN = (() => {
+  const p = path.join(os.homedir(), '.lmstudio', 'bin', process.platform === 'win32' ? 'lms.exe' : 'lms');
+  return fs.existsSync(p) ? p : 'lms';
+})();
+
+function lms(args, timeoutMs = 300000) {
+  return new Promise((resolve, reject) => {
+    execFile(LMS_BIN, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`lms ${args[0]} failed: ${(stderr || stdout || err.message).toString().trim().slice(-300)}`));
+      else resolve(String(stdout));
+    });
+  });
+}
+
+let loadLock = Promise.resolve();
+
+// Make sure `model` is in memory with a context that fits on the GPU. Returns true if it (re)loaded.
+function ensureModelLoaded(model, onLoading) {
+  if (!cfg.contextLength || !model) return Promise.resolve(false);
+  const run = loadLock.then(async () => {
+    const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return false;
+    const all = (await r.json()).data || [];
+    const m = all.find((x) => x.id === model);
+    if (!m) return false; // unknown id: let LM Studio report the error
+    const okCtx = m.loaded_context_length && m.loaded_context_length <= cfg.contextLength;
+    if (m.state === 'loaded' && okCtx) return false;
+
+    onLoading(m.state === 'loaded' ? 'Reloading the model with a smaller context…' : 'Loading the model into memory…');
+    // One GPU: unload every other LLM so they don't compete for memory.
+    if (all.some((x) => x.state === 'loaded' && x.type !== 'embeddings')) await lms(['unload', '--all'], 60000);
+    log(`Loading ${model} with context ${cfg.contextLength}`);
+    await lms(['load', model, '-y', '--context-length', String(cfg.contextLength), '--gpu', 'max']);
+    return true;
+  });
+  loadLock = run.catch(() => {});
+  return run;
+}
+
 async function listModels() {
-  const ctl = AbortSignal.timeout(4000);
   // LM Studio's native REST API reports load state; fall back to the OpenAI list.
   try {
-    const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: ctl });
+    const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const j = await r.json();
       return (j.data || [])
@@ -454,6 +749,8 @@ function friendlyError(e) {
   const msg = String((e && e.message) || e);
   if (/ECONNREFUSED|fetch failed|TimeoutError|aborted due to timeout/i.test(msg + (e && e.cause ? e.cause.code : '')))
     return 'Cannot reach LM Studio at ' + cfg.lmStudioUrl + '. Is the LM Studio server running?';
+  if (/context|n_ctx|too long|exceeds/i.test(msg) && /token|context/i.test(msg))
+    return 'The conversation no longer fits in the model\'s context window. Start a new chat, or load the model with a larger context.';
   return msg;
 }
 
@@ -464,9 +761,8 @@ function log(msg) {
 }
 
 function json(res, status, obj) {
-  const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(body);
+  res.end(JSON.stringify(obj));
 }
 
 function readJson(req, limit = 4 * 1024 * 1024) {
@@ -476,7 +772,7 @@ function readJson(req, limit = 4 * 1024 * 1024) {
     req.on('data', (c) => {
       size += c.length;
       if (size > limit) {
-        reject(Object.assign(new Error('Request body too large'), { status: 413 }));
+        reject(httpError(413, 'Request body too large'));
         req.destroy();
       } else chunks.push(c);
     });
@@ -485,7 +781,7 @@ function readJson(req, limit = 4 * 1024 * 1024) {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch {
-        reject(Object.assign(new Error('Invalid JSON body'), { status: 400 }));
+        reject(httpError(400, 'Invalid JSON body'));
       }
     });
     req.on('error', reject);
@@ -550,32 +846,46 @@ const server = http.createServer(async (req, res) => {
   failures.delete(addr);
 
   try {
+    const project = url.searchParams.get('project') || null;
     switch (route) {
       case 'GET /api/status':
         return await handleStatus(res);
       case 'POST /api/chat':
         return await handleChat(req, res);
-      case 'GET /api/claude-md':
-        return json(res, 200, { path: cfg.claudeMdAbs, content: await readClaudeMd() });
+      case 'GET /api/projects':
+        return json(res, 200, { root: cfg.projectsRootAbs || null, projects: await listProjects() });
+      case 'POST /api/projects': {
+        const body = await readJson(req);
+        return json(res, 201, await createProject(String(body.name || '').trim(), body.description));
+      }
+      case 'GET /api/claude-md': {
+        const t = await mdTarget(project);
+        const content = await readMd(t);
+        return json(res, 200, { path: t.file, exists: content !== null, content: content || '' });
+      }
       case 'PUT /api/claude-md': {
         const body = await readJson(req);
         if (typeof body.content !== 'string') return json(res, 400, { error: 'content (string) is required' });
-        await writeClaudeMd(body.content, 'web editor');
+        const t = await mdTarget(project);
+        await writeMd(t, body.content, 'web editor');
         return json(res, 200, { ok: true, chars: body.content.length });
       }
       default:
         return json(res, 404, { error: 'Not found' });
     }
   } catch (e) {
-    log(`error on ${route}: ${e.message}`);
+    if (!e.status) log(`error on ${route}: ${e.message}`);
     if (!res.headersSent) json(res, e.status || 500, { error: e.message });
     else res.end();
   }
 });
 
-server.listen(cfg.port, cfg.host, () => {
+module.exports = { listProjectFiles, readProjectFile, getProjectDir, validProjectName };
+
+if (require.main === module) server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);
-  log(`LM Studio:  ${cfg.lmStudioUrl}`);
-  log(`CLAUDE.md:  ${cfg.claudeMdAbs}`);
-  log(`Model edits to CLAUDE.md: ${cfg.allowModelEdits ? 'allowed' : 'disabled'}`);
+  log(`LM Studio:        ${cfg.lmStudioUrl}`);
+  log(`Global CLAUDE.md: ${cfg.claudeMdAbs}`);
+  log(`Projects folder:  ${cfg.projectsRootAbs || '(not set)'}`);
+  log(`Model edits to CLAUDE.md: ${cfg.allowModelEdits ? 'allowed' : 'disabled'}; code reading: ${cfg.allowCodeReading ? 'allowed' : 'disabled'}`);
 });
