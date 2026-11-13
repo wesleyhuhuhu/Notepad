@@ -50,6 +50,16 @@ What the model can and can't touch:
 - It can't read `.env` files, private keys, certificates or similar secret files, and it skips folders like `.git`, `node_modules`, `bin`, `obj` and `venv`.
 - The only files it can **write** are CLAUDE.md files.
 
+## Images and video
+
+If the model can see images (LM Studio lists it as a vision model), attach them with the paperclip button, by pasting, or by dragging files onto the chat.
+
+- **Images** are shrunk in the browser to at most 1280 px on the longest side before sending.
+- **Video** is turned into still frames, about one per second, up to 8 frames, along with a note telling the model the timestamps. The model sees images, not motion, and there's no audio. The browser has to be able to play the file: MP4 and WebM work everywhere, while iPhone HEVC videos work in Safari.
+- Up to 16 images per message, counting each video frame.
+- Images use context: each one costs roughly 500–1,500 tokens, and earlier images are sent again with every message in the same chat.
+- The chat history saved in your browser keeps only small thumbnails. After reloading the page, the model is told an earlier image existed but can't see it anymore.
+
 ## Model loading
 
 By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which uses the model's saved settings in **My Models**: context length, GPU offload, Flash Attention and KV cache quantization. If the model isn't loaded, LM Studio loads it on the first message with those settings.

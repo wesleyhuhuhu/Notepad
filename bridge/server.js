@@ -448,11 +448,46 @@ function stripThink(text) {
   return String(text || '').replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
 }
 
+const IMAGE_DATA_URL = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+=*$/;
+const MAX_IMAGES_PER_MESSAGE = 24;
+
+// User messages may carry images in the OpenAI format: an array of
+// { type: 'text', text } and { type: 'image_url', image_url: { url: 'data:image/...' } }.
+// Only inline base64 images are passed on (never remote URLs).
+function sanitizeParts(parts) {
+  const out = [];
+  let images = 0;
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (p.type === 'text' && typeof p.text === 'string') out.push({ type: 'text', text: p.text });
+    else if (
+      p.type === 'image_url' &&
+      p.image_url &&
+      typeof p.image_url.url === 'string' &&
+      images < MAX_IMAGES_PER_MESSAGE &&
+      IMAGE_DATA_URL.test(p.image_url.url)
+    ) {
+      out.push({ type: 'image_url', image_url: { url: p.image_url.url } });
+      images++;
+    }
+  }
+  if (!out.some((p) => p.type === 'text')) out.unshift({ type: 'text', text: '' });
+  return out;
+}
+
 function sanitizeHistory(messages) {
   if (!Array.isArray(messages)) return [];
   return messages
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-    .map((m) => ({ role: m.role, content: m.role === 'assistant' ? stripThink(m.content) : m.content }))
+    .filter(
+      (m) =>
+        m &&
+        (m.role === 'user' || m.role === 'assistant') &&
+        (typeof m.content === 'string' || (m.role === 'user' && Array.isArray(m.content)))
+    )
+    .map((m) => {
+      if (Array.isArray(m.content)) return { role: 'user', content: sanitizeParts(m.content) };
+      return { role: m.role, content: m.role === 'assistant' ? stripThink(m.content) : m.content };
+    })
     .slice(-40);
 }
 
@@ -524,7 +559,8 @@ async function streamCompletion(payload, send, signal) {
 // ------------------------------------------------------------- handlers ---
 
 async function handleChat(req, res) {
-  const body = await readJson(req);
+  // Larger limit than other routes: messages can carry images.
+  const body = await readJson(req, 64 * 1024 * 1024);
   const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
   const project = typeof body.project === 'string' && body.project ? body.project : null;
   const allowCode = cfg.allowCodeReading && !!project;
@@ -736,7 +772,7 @@ async function listModels() {
       const j = await r.json();
       return (j.data || [])
         .filter((m) => m.type !== 'embeddings')
-        .map((m) => ({ id: m.id, loaded: m.state === 'loaded' }));
+        .map((m) => ({ id: m.id, loaded: m.state === 'loaded', vision: m.type === 'vlm' }));
     }
   } catch (e) {
     if (e.name === 'TimeoutError') throw e;

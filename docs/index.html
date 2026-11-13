@@ -57,7 +57,33 @@ header .actions { display: flex; gap: 6px; }
 
 .layout { flex: 1; display: flex; min-height: 0; }
 .chat-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-#messages { flex: 1; overflow-y: auto; padding: 20px 16px; }
+.chat-col.drag { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.msgwrap { flex: 1; min-height: 0; position: relative; display: flex; }
+#messages { flex: 1; overflow-y: auto; padding: 20px 16px; overscroll-behavior: contain; }
+#jump {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  border-radius: 999px; padding: 5px 14px; font-size: 13px; box-shadow: 0 2px 8px rgb(0 0 0 / .15);
+}
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; justify-content: flex-end; }
+.thumb { position: relative; flex: none; }
+.thumb img, .thumb .ph {
+  width: 88px; height: 88px; object-fit: cover; border-radius: 8px; display: block;
+  background: var(--chip); border: 1px solid var(--border);
+}
+.thumb .badge {
+  position: absolute; left: 4px; bottom: 4px; background: rgb(0 0 0 / .65); color: #fff;
+  font-size: 11px; padding: 1px 6px; border-radius: 999px; max-width: calc(100% - 8px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.thumb .rm {
+  position: absolute; top: -7px; right: -7px; width: 22px; height: 22px; padding: 0;
+  border-radius: 50%; line-height: 1; font-size: 13px;
+}
+.thumb.bad img, .thumb.bad .ph { outline: 2px solid var(--bad); }
+#tray { justify-content: flex-start; flex-wrap: wrap; margin-bottom: 10px; padding-top: 7px; }
+#tray:empty { display: none; }
+#attach { height: 42px; width: 42px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+#attach svg { width: 20px; height: 20px; }
 .inner { max-width: 780px; margin: 0 auto; }
 .msg { margin: 0 0 18px; }
 .msg.user { display: flex; justify-content: flex-end; }
@@ -147,8 +173,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; row-gap: 8px; }
   header h1 { display: none; }
-  #project { flex: 1; max-width: none; }
-  .status { order: 3; flex-basis: 100%; }
+  #project { flex: 1 1 100%; max-width: none; }
+  .status { order: 2; flex: 1 1 0; }
+  header .actions { order: 3; }
   header .actions button { padding: 6px 9px; }
 }
 </style>
@@ -167,9 +194,17 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
 <div class="layout">
   <div class="chat-col">
-    <div id="messages"><div class="inner" id="list"></div></div>
+    <div class="msgwrap">
+      <div id="messages" tabindex="-1"><div class="inner" id="list"></div></div>
+      <button id="jump" hidden>↓ Latest</button>
+    </div>
     <div class="composer">
+      <div class="inner" id="tray"></div>
       <div class="inner">
+        <button id="attach" title="Attach images or a video" aria-label="Attach images or a video">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="fileInput" accept="image/*,video/*" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message your local model…"></textarea>
         <button id="send" class="primary">Send</button>
       </div>
@@ -333,6 +368,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         setStatus('ok', loaded.length ? loaded.map((m) => m.id).join(', ') : 'Connected (no model loaded)');
       }
       fillModels(status);
+      updateAttach();
       $('allowEdits').disabled = !status.allowModelEdits;
       if (!status.allowModelEdits) $('allowEdits').checked = false;
       return status;
@@ -436,49 +472,70 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
   }
 
+  const div = (cls) => { const d = document.createElement('div'); if (cls) d.className = cls; return d; };
+
+  // Builds the message's elements once, then only updates what changed. Rebuilding
+  // everything on every streamed token made scrolling jump and undid any
+  // expand/collapse or scrolling inside the reasoning box.
   function renderAssistant(el, m, streaming) {
+    let v = el._view;
+    if (!v) {
+      el.textContent = '';
+      v = el._view = {
+        notice: div('notice'), details: document.createElement('details'), summary: document.createElement('summary'),
+        rbox: div(), tools: div('tools'), body: div('body'), err: div('err'),
+        reason: null, content: null, toolsKey: null,
+      };
+      v.details.className = 'reasoning';
+      v.details.append(v.summary, v.rbox);
+      // Remember the user's choice so streaming doesn't keep re-opening or closing it.
+      v.summary.addEventListener('click', () => { m.reasoningOpen = !v.details.open; });
+      el.append(v.notice, v.details, v.tools, v.body, v.err);
+    }
     const { reasoning: inlineR, content } = splitThink(m.content || '');
     const reasoning = [m.reasoning || '', inlineR].filter(Boolean).join('\n').trim();
-    el.innerHTML = '';
-    if (streaming && m.notice) {
-      const n = document.createElement('div');
-      n.className = 'notice';
-      n.textContent = m.notice;
-      el.appendChild(n);
-    }
+
+    v.notice.hidden = !(streaming && m.notice);
+    if (!v.notice.hidden) v.notice.textContent = m.notice;
+
+    v.details.hidden = !reasoning;
     if (reasoning) {
-      const d = document.createElement('details');
-      d.className = 'reasoning';
-      d.open = !!(streaming && !content);
-      const s = document.createElement('summary');
-      s.textContent = streaming && !content ? 'Thinking…' : 'Reasoning';
-      const b = document.createElement('div');
-      b.textContent = reasoning;
-      d.append(s, b);
-      el.appendChild(d);
+      const thinking = streaming && !content;
+      v.summary.textContent = thinking ? 'Thinking…' : 'Reasoning';
+      const open = m.reasoningOpen !== undefined ? m.reasoningOpen : thinking;
+      if (v.details.open !== open) v.details.open = open;
+      if (reasoning !== v.reason) {
+        const rb = v.rbox;
+        const atEnd = rb.scrollHeight - rb.scrollTop - rb.clientHeight < 8;
+        rb.textContent = reasoning;
+        v.reason = reasoning;
+        if (atEnd) rb.scrollTop = rb.scrollHeight;
+      }
     }
-    if (m.tools && m.tools.length) {
-      const wrap = document.createElement('div');
-      wrap.className = 'tools';
-      for (const t of m.tools) {
+
+    const tools = m.tools || [];
+    const toolsKey = JSON.stringify(tools.map((t) => [t.name, t.ok, t.args && t.args.path, t.args && t.args.scope]));
+    if (toolsKey !== v.toolsKey) {
+      v.toolsKey = toolsKey;
+      v.tools.textContent = '';
+      v.tools.hidden = !tools.length;
+      for (const t of tools) {
         const c = document.createElement('span');
         c.className = 'tool ' + (t.ok === undefined ? 'pending' : t.ok ? 'ok' : 'bad');
         c.textContent = toolLabel(t);
         if (t.result && !t.ok) c.title = t.result;
-        wrap.appendChild(c);
+        v.tools.appendChild(c);
       }
-      el.appendChild(wrap);
     }
-    const body = document.createElement('div');
-    body.className = 'body' + (streaming ? ' cursor' : '');
-    body.innerHTML = md(content);
-    el.appendChild(body);
-    if (m.error) {
-      const e = document.createElement('div');
-      e.className = 'err';
-      e.textContent = m.error;
-      el.appendChild(e);
+
+    v.body.className = 'body' + (streaming ? ' cursor' : '');
+    if (content !== v.content) {
+      v.content = content;
+      v.body.innerHTML = md(content);
     }
+
+    v.err.hidden = !m.error;
+    if (m.error) v.err.textContent = m.error;
   }
 
   function render() {
@@ -517,34 +574,250 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const el = document.createElement('div');
     el.className = 'msg ' + m.role;
     if (m.role === 'user') {
-      const b = document.createElement('div');
-      b.className = 'bubble';
-      b.textContent = m.content;
+      const b = div('bubble');
+      if (m.attachments && m.attachments.length) {
+        const t = div('thumbs');
+        for (const a of m.attachments) t.appendChild(thumbEl(a.thumb, a.name, a.kind === 'video' ? `▶ ${a.frames} frames` : ''));
+        b.appendChild(t);
+      }
+      if (m.content) b.appendChild(document.createTextNode(m.content));
       el.appendChild(b);
     } else renderAssistant(el, m, streaming);
     return el;
   }
 
-  function scrollDown(force) {
-    const box = $('messages');
-    if (force || box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
+  function thumbEl(src, name, badge) {
+    const w = div('thumb');
+    if (src) {
+      const img = new Image();
+      img.src = src;
+      img.alt = name || '';
+      img.title = name || '';
+      w.appendChild(img);
+    } else w.appendChild(div('ph'));
+    if (badge) { const b = div('badge'); b.textContent = badge; w.appendChild(b); }
+    return w;
   }
 
+  // ------------------------------------------------------------ scroll --
+  // Follow new output only while the user is at the bottom. Any upward scroll
+  // (wheel, touch, keys, scrollbar) stops following until they come back down.
+  const box = $('messages');
+  let stick = true;
+  let touching = false;
+  const distance = () => box.scrollHeight - box.scrollTop - box.clientHeight;
+  const updateJump = () => { $('jump').hidden = distance() < 200; };
+  function scrollDown(force) {
+    if (force) stick = true;
+    if (stick) box.scrollTop = box.scrollHeight;
+    updateJump();
+  }
+  box.addEventListener('scroll', () => {
+    const d = distance();
+    if (d <= 4 && !touching) stick = true;
+    else if (d > 40) stick = false;
+    updateJump();
+  }, { passive: true });
+  box.addEventListener('wheel', (e) => { if (e.deltaY < 0) stick = false; }, { passive: true });
+  box.addEventListener('touchstart', () => { touching = true; }, { passive: true });
+  box.addEventListener('touchmove', () => { stick = false; }, { passive: true });
+  box.addEventListener('touchend', () => { touching = false; if (distance() <= 4) stick = true; }, { passive: true });
+  box.addEventListener('keydown', (e) => { if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) stick = false; });
+  $('jump').addEventListener('click', () => {
+    stick = true;
+    box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+  });
+
   const save = (key, msgs) => store.set(key, msgs.slice(-100));
+
+  // ------------------------------------------------------- attachments --
+  // Images are shrunk in the browser before sending (fewer tokens, faster upload).
+  // Videos become a handful of still frames, since the model reads images, not video.
+  const IMG_MAX = 1280;        // longest side for photos/screenshots
+  const FRAME_MAX = 768;       // longest side for video frames
+  const MAX_FRAMES = 8;        // frames per video (about one per second for short clips)
+  const MAX_IMAGES = 16;       // images per message, counting video frames
+  let pending = [];            // attachments waiting in the composer
+  const liveParts = new WeakMap(); // full images for messages sent in this tab (not saved)
+
+  function canvasJpeg(src, w, h, max, quality) {
+    const scale = Math.min(1, max / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(src, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', quality);
+  }
+
+  async function decodeImage(file) {
+    try {
+      const bmp = await createImageBitmap(file);
+      return { src: bmp, w: bmp.width, h: bmp.height };
+    } catch {
+      const url = URL.createObjectURL(file);
+      try {
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        return { src: img, w: img.naturalWidth, h: img.naturalHeight };
+      } catch {
+        throw new Error("This browser can't open that image format.");
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    }
+  }
+
+  const waitFor = (target, event, ms = 8000) => new Promise((res, rej) => {
+    const t = setTimeout(() => { target.removeEventListener(event, ok); rej(new Error('Timed out reading the video.')); }, ms);
+    function ok() { clearTimeout(t); target.removeEventListener(event, ok); res(); }
+    target.addEventListener(event, ok);
+  });
+
+  async function videoFrames(file) {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    try {
+      const meta = waitFor(v, 'loadedmetadata', 15000);
+      const fail = new Promise((_, rej) => { v.onerror = () => rej(new Error("This browser can't play that video format.")); });
+      v.src = url;
+      await Promise.race([meta, fail]);
+      // Some recordings (e.g. WebM) don't report a length until you seek to the end.
+      if (!isFinite(v.duration)) {
+        v.currentTime = 1e9;
+        await waitFor(v, 'seeked').catch(() => {});
+      }
+      const dur = isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+      const n = dur ? Math.min(MAX_FRAMES, Math.max(1, Math.round(dur))) : 1;
+      const times = Array.from({ length: n }, (_, i) => (dur ? (dur * (i + 0.5)) / n : 0));
+      const frames = [];
+      let thumb = '';
+      for (const t of times) {
+        // Always seek, even to the current position, so the frame is actually decoded.
+        v.currentTime = Math.abs(v.currentTime - t) < 0.001 ? t + 0.001 : t;
+        await waitFor(v, 'seeked');
+        frames.push(canvasJpeg(v, v.videoWidth, v.videoHeight, FRAME_MAX, 0.8));
+        if (!thumb) thumb = canvasJpeg(v, v.videoWidth, v.videoHeight, 176, 0.7);
+      }
+      const fmt = (s) => s.toFixed(1) + 's';
+      const note = `[Video "${file.name || 'video'}", ${fmt(dur)} long. The ${n} images below are frames from it at ${times.map(fmt).join(', ')}. There is no audio.]`;
+      return { frames, thumb, note };
+    } finally {
+      v.removeAttribute('src');
+      v.load();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  const imageCount = () => pending.reduce((n, p) => n + (p.images ? p.images.length : p.kind === 'video' ? MAX_FRAMES : 1), 0);
+
+  async function addFiles(files) {
+    for (const f of files) {
+      const isVideo = /^video\//.test(f.type);
+      const isImage = /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name || '');
+      if (!isVideo && !isImage) continue;
+      if (imageCount() >= MAX_IMAGES) { flashTray(`Up to ${MAX_IMAGES} images per message (a video counts as up to ${MAX_FRAMES}).`); break; }
+      const item = { kind: isVideo ? 'video' : 'image', name: f.name || (isVideo ? 'video' : 'pasted image'), loading: true };
+      pending.push(item);
+      renderTray();
+      try {
+        if (isVideo) {
+          const r = await videoFrames(f);
+          Object.assign(item, { images: r.frames, thumb: r.thumb, note: r.note });
+        } else {
+          const d = await decodeImage(f);
+          item.images = [canvasJpeg(d.src, d.w, d.h, IMG_MAX, 0.85)];
+          item.thumb = canvasJpeg(d.src, d.w, d.h, 176, 0.7);
+          if (d.src.close) d.src.close();
+        }
+      } catch (e) {
+        item.error = e.message || 'Could not read this file.';
+      }
+      item.loading = false;
+      renderTray();
+    }
+  }
+
+  function renderTray() {
+    const tray = $('tray');
+    tray.textContent = '';
+    for (const p of pending) {
+      const badge = p.loading ? 'Reading…' : p.error ? 'Error' : p.kind === 'video' ? `▶ ${p.images.length} frames` : '';
+      const t = thumbEl(p.thumb, p.error || p.name, badge);
+      if (p.error) t.classList.add('bad');
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.type = 'button';
+      rm.textContent = '×';
+      rm.title = 'Remove';
+      rm.onclick = () => { pending = pending.filter((x) => x !== p); renderTray(); };
+      t.appendChild(rm);
+      tray.appendChild(t);
+    }
+  }
+
+  let flashTimer = 0;
+  function flashTray(msg) {
+    $('input').placeholder = msg;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { $('input').placeholder = 'Message your local model…'; }, 4000);
+  }
+
+  function visionAvailable() {
+    if (!status || !status.lmStudio || !status.lmStudio.models) return true;
+    const models = status.lmStudio.models;
+    const id = $('model').value || status.defaultModel || (models.find((m) => m.loaded) || {}).id;
+    const m = models.find((x) => x.id === id);
+    return !m || m.vision !== false;
+  }
+  function updateAttach() {
+    const ok = visionAvailable();
+    $('attach').disabled = !ok;
+    $('attach').title = ok ? 'Attach images or a video' : "The selected model can't see images";
+  }
+
+  // What gets sent to the model for one stored message.
+  function apiMessage(m) {
+    if (m.role === 'user' && m.attachments && m.attachments.length) {
+      const parts = liveParts.get(m);
+      if (parts) return { role: 'user', content: parts };
+      const gone = m.attachments.map((a) => `[${a.kind === 'video' ? 'A video' : 'An image'} ("${a.name}") was attached here earlier but is no longer available.]`).join('\n');
+      return { role: 'user', content: [m.content, gone].filter(Boolean).join('\n\n') };
+    }
+    return { role: m.role, content: m.content };
+  }
 
   // -------------------------------------------------------------- chat --
   async function send(textOverride) {
     if (busy) { busy.abort(); return; }
-    const text = (typeof textOverride === 'string' ? textOverride : $('input').value).trim();
-    if (!text) return;
+    const fromInput = typeof textOverride !== 'string';
+    const text = (fromInput ? $('input').value : textOverride).trim();
+    if (fromInput && pending.some((p) => p.loading)) { flashTray('Still reading attachments…'); return; }
+    const atts = fromInput ? pending.filter((p) => !p.error && p.images && p.images.length) : [];
+    if (!text && !atts.length) return;
     if (!settings.bridgeUrl || !settings.token) { openSettings(); return; }
 
-    if (typeof textOverride !== 'string') { $('input').value = ''; autosize(); }
+    if (fromInput) { $('input').value = ''; autosize(); pending = []; renderTray(); }
     const chatProject = project;
     const chatKey = historyKey();
     const chat = messages;
     if (!chat.length) $('list').innerHTML = '';
     const user = { role: 'user', content: text };
+    if (atts.length) {
+      user.attachments = atts.map((a) => ({ kind: a.kind, name: a.name, thumb: a.thumb, frames: a.images.length }));
+      const notes = atts.map((a) => a.note).filter(Boolean);
+      const intro = [text || (atts.length > 1 ? 'Here are some images.' : 'Here is an image.'), ...notes].join('\n\n');
+      liveParts.set(user, [
+        { type: 'text', text: intro },
+        ...atts.flatMap((a) => a.images.map((url) => ({ type: 'image_url', image_url: { url } }))),
+      ]);
+    }
     chat.push(user);
     $('list').appendChild(msgEl(user));
     const a = { role: 'assistant', content: '', reasoning: '', tools: [] };
@@ -559,7 +832,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const paint = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderAssistant(el, a, true); scrollDown(); }); };
 
     try {
-      const history = chat.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
+      const history = chat.slice(0, -1).filter((m) => !m.error || m.content).map(apiMessage);
       const r = await api('/api/chat', {
         method: 'POST',
         signal: busy.signal,
@@ -785,7 +1058,24 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('mdReload').addEventListener('click', () => { mdLoaded = $('mdtext').value; loadMd(); });
   $('mdSave').addEventListener('click', saveMd);
   $('mdGenerate').addEventListener('click', () => { if (window.innerWidth <= 860) $('mdpanel').classList.remove('open'); generateMd(); });
-  $('model').addEventListener('change', () => store.set('model', $('model').value));
+  $('model').addEventListener('change', () => { store.set('model', $('model').value); updateAttach(); });
+  $('attach').addEventListener('click', () => $('fileInput').click());
+  $('fileInput').addEventListener('change', () => { addFiles([...$('fileInput').files]); $('fileInput').value = ''; });
+  $('input').addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData ? e.clipboardData.files : [])];
+    if (files.length && !$('attach').disabled) { e.preventDefault(); addFiles(files); }
+  });
+  const col = document.querySelector('.chat-col');
+  let dragDepth = 0;
+  col.addEventListener('dragenter', (e) => { if ([...e.dataTransfer.types].includes('Files')) { dragDepth++; col.classList.add('drag'); } });
+  col.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; col.classList.remove('drag'); } });
+  col.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+  col.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    col.classList.remove('drag');
+    if (!$('attach').disabled) addFiles([...e.dataTransfer.files]);
+  });
   $('allowEdits').checked = store.get('allowEdits', true);
   $('allowEdits').addEventListener('change', () => store.set('allowEdits', $('allowEdits').checked));
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshStatus(); loadProjects(); } });
