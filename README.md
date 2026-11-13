@@ -52,7 +52,9 @@ What the model can and can't touch:
 
 ## Model loading
 
-LM Studio sometimes unloads the model when idle and then reloads it on demand with a very large context (60k on this PC). That overflows the GPU's 16 GB and slows replies to several seconds per word. To prevent that, the bridge checks before every chat. If the model isn't loaded, or is loaded with more than `contextLength` (16,384) tokens, it unloads and reloads it with that context, fully on the GPU. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
+LM Studio sometimes unloads the model when idle and then reloads it on demand with whatever context it picks, which can overflow the GPU's 16 GB and slow replies to several seconds per word. To prevent that, the bridge checks before every chat. If the model isn't loaded, or is loaded with more than `contextLength` tokens (set to 59,392, about 58k, in `config.json`), it unloads and reloads it with that context, fully on the GPU. Other load settings, like Flash Attention and KV cache quantization, come from the model's defaults in LM Studio's My Models settings.
+
+58k only fits when nothing else is using the GPU. While gaming, start with `.\start.ps1 -ContextLength 16384` instead. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
 
 ## One-time setup
 
@@ -90,15 +92,15 @@ In `bridge/config.json`, change `"allowedOrigins": ["*"]` to `["https://<your-us
 
 It prints your **public bridge URL** and **access token**. Open the GitHub Pages site, click **Settings**, paste both, and **Test connection**. The browser remembers them. (If `siteUrl` is set, just open the printed one-click link instead.)
 
-Options: `-Model <id>` picks a model, `-ContextLength 16384` sets context, `-NoFunnel` keeps it local-only.
+Options: `-Model <id>` picks a model, `-ContextLength <tokens>` overrides the context from `config.json` for this run (the bridge follows it), `-NoFunnel` keeps it local-only.
 
 To stop public access entirely: `tailscale funnel --https=443 off`.
 
 ## Model and performance notes
 
-- On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` with a 16k context fits on the GPU and answers in roughly 10–25 seconds (it thinks first; open **Reasoning** to see it).
+- On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` fits on the GPU with about 58k context (Q8 KV cache, nothing else using the GPU), or 16k while gaming. Short answers take roughly 10–25 seconds (it thinks first; open **Reasoning** to see it).
 - The `@iq4_xs` file (15.8 GB) won't fit on the GPU with context, so it spills into system RAM and gets very slow.
-- Generating a CLAUDE.md for a small project takes about a minute. The 16k context means the model reads a handful of key files, not a whole large codebase.
+- Generating a CLAUDE.md for a small project takes about a minute. Even at 58k, the model reads the key files, not a whole large codebase.
 
 ## Security
 

@@ -66,6 +66,7 @@ function loadConfig() {
   if (process.env.CLAUDE_MD_PATH) cfg.claudeMdPath = process.env.CLAUDE_MD_PATH;
   if (process.env.PROJECTS_ROOT) cfg.projectsRoot = process.env.PROJECTS_ROOT;
   if (process.env.BRIDGE_MODEL) cfg.model = process.env.BRIDGE_MODEL;
+  if (process.env.BRIDGE_CONTEXT_LENGTH) cfg.contextLength = Number(process.env.BRIDGE_CONTEXT_LENGTH);
 
   cfg.claudeMdAbs = expandPath(cfg.claudeMdPath);
   cfg.projectsRootAbs = cfg.projectsRoot ? expandPath(cfg.projectsRoot) : '';
