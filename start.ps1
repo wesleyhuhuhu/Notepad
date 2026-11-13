@@ -9,7 +9,8 @@
     .\start.ps1                       # uses "model" from bridge\config.json, or whatever is loaded
     .\start.ps1 -Model qwen3.8-27b-heretic-abliterated-uncensored@iq4_xs
     .\start.ps1 -NoFunnel             # local only, no internet access
-    .\start.ps1 -ContextLength 16384  # e.g. while a game is using the GPU (default: contextLength in config.json)
+    .\start.ps1 -ContextLength 16384  # cap the context, e.g. while a game is using the GPU
+                                      # (default: the model's own LM Studio settings)
 #>
 param(
   [string]$Model = "",
@@ -39,11 +40,15 @@ if (-not $cfg.accessToken) {
 }
 $port = if ($cfg.port) { [int]$cfg.port } else { 8787 }
 if (-not $Model -and $cfg.model) { $Model = $cfg.model }
-if (-not $ContextLength) { $ContextLength = if ($cfg.contextLength) { [int]$cfg.contextLength } else { 16384 } }
-if ($ContextLength -ne [int]$cfg.contextLength) {
-  # Keep the bridge in step, or it would reload the model back to the config value on the next chat.
+if (-not $ContextLength -and $cfg.contextLength) { $ContextLength = [int]$cfg.contextLength }
+# Extra lms load arguments. With no -ContextLength, LM Studio's saved settings for the model apply.
+$loadArgs = @('-y')
+if ($ContextLength) {
+  $loadArgs += @('--context-length', "$ContextLength")
+  # Tell the bridge too, so it keeps the model at or below this size.
   $env:BRIDGE_CONTEXT_LENGTH = "$ContextLength"
 }
+$ctxLabel = if ($ContextLength) { "context $ContextLength" } else { "LM Studio's saved settings" }
 
 # 1. LM Studio server
 Info "Starting LM Studio server"
@@ -57,12 +62,12 @@ try {
 } catch { Write-Warning "Could not query LM Studio models: $($_.Exception.Message)" }
 
 if ($Model -and ($loaded -notcontains $Model)) {
-  Info "Loading $Model (context $ContextLength)"
-  & lms load $Model -y --context-length $ContextLength --gpu max 2>&1 | Out-Host
+  Info "Loading $Model ($ctxLabel)"
+  & lms load $Model @loadArgs 2>&1 | Out-Host
 } elseif (-not $loaded.Count) {
   Info "No model loaded. Loading the first one LM Studio offers (pass -Model to choose)"
   $first = ($models | Where-Object { $_.type -ne 'embeddings' } | Select-Object -First 1).id
-  if ($first) { & lms load $first -y --context-length $ContextLength --gpu max 2>&1 | Out-Host }
+  if ($first) { & lms load $first @loadArgs 2>&1 | Out-Host }
   else { Write-Warning "No models downloaded in LM Studio." }
 } else {
   Info "Model already loaded: $($loaded -join ', ')"

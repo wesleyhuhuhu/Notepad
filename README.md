@@ -52,9 +52,19 @@ What the model can and can't touch:
 
 ## Model loading
 
-LM Studio sometimes unloads the model when idle and then reloads it on demand with whatever context it picks, which can overflow the GPU's 16 GB and slow replies to several seconds per word. To prevent that, the bridge checks before every chat. If the model isn't loaded, or is loaded with more than `contextLength` tokens (set to 59,392, about 58k, in `config.json`), it unloads and reloads it with that context, fully on the GPU. Other load settings, like Flash Attention and KV cache quantization, come from the model's defaults in LM Studio's My Models settings.
+By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which uses the model's saved settings in **My Models**: context length, GPU offload, Flash Attention and KV cache quantization. If the model isn't loaded, LM Studio loads it on the first message with those settings.
 
-58k only fits when nothing else is using the GPU. While gaming, start with `.\start.ps1 -ContextLength 16384` instead. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
+Set the context length there to something that fits. Measured on the RTX 5070 Ti with Chrome, Firefox, Discord and Steam open (about 0.8 GB of GPU memory in use):
+
+| Context | Generation speed |
+|---|---|
+| up to 55,296 (54k) | ~45 tokens/s |
+| 57,344 (56k) | ~19 tokens/s |
+| 60,000 | ~4 tokens/s (part of the model ends up in system RAM) |
+
+The limit moves with whatever else is using the GPU. If replies suddenly crawl, something else is taking GPU memory.
+
+While gaming, start with `.\start.ps1 -ContextLength 16384`. The bridge then treats 16,384 as a cap: on the next message, if the model is loaded with a bigger context (or not loaded), it reloads it at 16,384. You can also set a permanent cap with `"contextLength"` in `config.json`. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
 
 ## One-time setup
 
@@ -92,13 +102,13 @@ In `bridge/config.json`, change `"allowedOrigins": ["*"]` to `["https://<your-us
 
 It prints your **public bridge URL** and **access token**. Open the GitHub Pages site, click **Settings**, paste both, and **Test connection**. The browser remembers them. (If `siteUrl` is set, just open the printed one-click link instead.)
 
-Options: `-Model <id>` picks a model, `-ContextLength <tokens>` overrides the context from `config.json` for this run (the bridge follows it), `-NoFunnel` keeps it local-only.
+Options: `-Model <id>` picks a model, `-ContextLength <tokens>` caps the context for this run (the bridge follows it), `-NoFunnel` keeps it local-only.
 
 To stop public access entirely: `tailscale funnel --https=443 off`.
 
 ## Model and performance notes
 
-- On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` fits on the GPU with about 58k context (Q8 KV cache, nothing else using the GPU), or 16k while gaming. Short answers take roughly 10–25 seconds (it thinks first; open **Reasoning** to see it).
+- On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` with a Q8 KV cache runs at about 45 tokens/s with up to 54k context (with everyday apps open), or 16k while gaming. It thinks before answering; open **Reasoning** to see it.
 - The `@iq4_xs` file (15.8 GB) won't fit on the GPU with context, so it spills into system RAM and gets very slow.
 - Generating a CLAUDE.md for a small project takes about a minute. Even at 58k, the model reads the key files, not a whole large codebase.
 

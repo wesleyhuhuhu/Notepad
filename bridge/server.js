@@ -37,10 +37,10 @@ const DEFAULTS = {
   allowCodeReading: true,
   maxToolRounds: 12,
   maxBackups: 50,
-  // The bridge loads the model itself with this context length (tokens). LM Studio's
-  // on-demand loading otherwise picks a huge context that overflows GPU memory.
-  // Set to 0 to leave model loading entirely to LM Studio.
-  contextLength: 16384,
+  // 0 = leave model loading to LM Studio (it uses the model's saved settings in My Models).
+  // A number = an upper limit: if the model is loaded with a bigger context, or not loaded,
+  // the bridge loads it with this context instead (e.g. 16384 while a game uses the GPU).
+  contextLength: 0,
   accessToken: '',
 };
 
@@ -720,7 +720,8 @@ function ensureModelLoaded(model, onLoading) {
     // One GPU: unload every other LLM so they don't compete for memory.
     if (all.some((x) => x.state === 'loaded' && x.type !== 'embeddings')) await lms(['unload', '--all'], 60000);
     log(`Loading ${model} with context ${cfg.contextLength}`);
-    await lms(['load', model, '-y', '--context-length', String(cfg.contextLength), '--gpu', 'max']);
+    // GPU offload, KV cache type etc. come from the model's saved LM Studio settings.
+    await lms(['load', model, '-y', '--context-length', String(cfg.contextLength)]);
     return true;
   });
   loadLock = run.catch(() => {});

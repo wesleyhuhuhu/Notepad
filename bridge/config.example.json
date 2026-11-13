@@ -12,7 +12,7 @@
   "allowCodeReading": true,
   "maxToolRounds": 12,
   "maxBackups": 50,
-  "contextLength": 16384,
+  "contextLength": 0,
   "siteUrl": "",
   "accessToken": ""
 }
