@@ -79,6 +79,61 @@ Compaction keeps a long chat going, but it can't help a single message that's to
 
 Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.6` compacts earlier.
 
+## Claude Code with your local model
+
+`cli/` has launchers that start [Claude Code](https://claude.com/claude-code) using the model on your PC instead of Anthropic's servers. They work on the PC itself or on any other computer, through the public bridge address. Your normal `claude` command is unchanged; the launcher sets everything only for the session it starts.
+
+**Install on Windows.** Copy both files next to `claude.exe`, which is already on your PATH:
+```powershell
+Copy-Item cli\claude-local.ps1, cli\claude-local.cmd "$env:USERPROFILE\.local\bin\"
+```
+
+**Install on macOS or Linux:**
+```bash
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/wesleyhuhuhu/Notepad/main/cli/claude-local.sh -o ~/bin/claude-local && chmod +x ~/bin/claude-local
+```
+If `~/bin` isn't on your PATH, add `export PATH="$HOME/bin:$PATH"` to `~/.zshrc`.
+
+**Use:** run `claude-local` in a project folder. The first run asks for:
+- **the bridge address:** `http://127.0.0.1:8787` on the PC itself, or your `https://…ts.net` address anywhere else;
+- **the access token.**
+
+Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.config/claude-local/config`, readable only by you). Any normal `claude` options pass straight through, e.g. `claude-local -p "fix the failing test"` or `claude-local --continue`.
+
+| Option | What it does |
+|---|---|
+| `--all-tools` | Every Claude Code tool. By default only Read, Edit, Write, Bash, Grep and Glob are sent, which keeps the setup at ~5k tokens instead of ~16k. |
+| `--max-output N` | Longest reply, thinking included (default 8192). Lower leaves more room before compaction; higher allows longer thinking. |
+| `--context N` | Tell Claude Code a smaller context than the loaded model's. |
+| `--setup` | Change the saved address or token. |
+
+**How it works:**
+- **The bridge's endpoint:** the bridge exposes Anthropic's API format at `/v1/messages`, protected by the access token, and forwards it to LM Studio. Claude Code puts some system messages in the middle of the conversation, and Qwen's chat template rejects those ("System message must be at the beginning"), so the bridge folds them into the neighbouring user message.
+- **Settings the launcher passes:** it asks the bridge which model is loaded and its context size, then starts Claude Code with:
+  - `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` pointing at the bridge;
+  - every model setting set to that model;
+  - **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** set to the model's real context, which is what makes Claude Code auto-compact before it overflows. (The `--autocompact` flag and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only accept 100k–1M.)
+  - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` set to 8192.
+
+**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts. With a 55.3k context:
+
+| Reply cap | Free for work | Compacts at about |
+|---|---|---|
+| 32,000 (Claude Code's default) | 17.3k | 22k |
+| **8,192 (launcher default)** | **29.2k** | **34k** |
+| 4,096 | 33.3k | 38k, but long thinking may get cut off |
+
+**Tested:**
+- **Windows:** Claude Code found and fixed two bugs in a small Python project and ran its tests, in 29 seconds.
+- **macOS script:** run through the public address from another shell, it answered a question about the code.
+
+**Limits:**
+- **Smaller context:** Claude Code needs about 32k or more to be useful, and the launcher warns below that.
+- **Reliability:** Claude Code is built for Claude, so expect the local model to be less reliable on long, multi-step tasks.
+- **Harmless messages:** Claude Code may print `unrecognized_model` and a note about auto-mode billing because requests go through a gateway. Both can be ignored.
+
+**Security:** commands and file edits happen on the computer where you run `claude-local`, with Claude Code's usual permission prompts. The bridge only lends that computer the model. Anyone with your token can use the model through `/v1/messages`, but can't run anything on your PC.
+
 ## Model loading
 
 By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which uses the model's saved settings in **My Models**: context length, GPU offload, Flash Attention and KV cache quantization. If the model isn't loaded, LM Studio loads it on the first message with those settings.

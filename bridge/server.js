@@ -1013,6 +1013,106 @@ async function handleChat(req, res) {
   }
 }
 
+// ------------------------------------------------------ Claude Code API ---
+// LM Studio already serves Anthropic's /v1/messages format. Claude Code also puts system
+// messages in the middle of the conversation, which Qwen's chat template rejects ("System
+// message must be at the beginning"), so they are folded into the neighbouring user turn.
+
+const asBlocks = (content) =>
+  typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+
+function systemTextOf(m) {
+  return asBlocks(m.content)
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n');
+}
+
+function foldSystemMessages(messages) {
+  const out = [];
+  let carry = []; // system text waiting for the next user message
+  for (const m of messages || []) {
+    if (!m || typeof m !== 'object') continue;
+    if (m.role === 'system') {
+      const text = systemTextOf(m).trim();
+      if (!text) continue;
+      const block = { type: 'text', text: `<system-reminder>\n${text}\n</system-reminder>` };
+      const prev = out[out.length - 1];
+      if (prev && prev.role === 'user') prev.content = [...asBlocks(prev.content), block];
+      else carry.push(block);
+      continue;
+    }
+    if (m.role === 'user' && carry.length) {
+      out.push({ ...m, content: [...carry, ...asBlocks(m.content)] });
+      carry = [];
+      continue;
+    }
+    out.push(m);
+  }
+  if (carry.length) out.push({ role: 'user', content: carry });
+  return out;
+}
+
+const anthropicChars = (body) =>
+  JSON.stringify(body.system || '').length + JSON.stringify(body.tools || []).length + JSON.stringify(body.messages || []).length;
+
+async function handleAnthropic(req, res, route) {
+  const body = await readJson(req, 64 * 1024 * 1024);
+  const known = (await listModels().catch(() => [])).map((m) => m.id);
+  const model = known.includes(body.model) ? body.model : await resolveModel(null);
+  body.model = model;
+  body.messages = foldSystemMessages(body.messages);
+
+  if (route.endsWith('/count_tokens')) {
+    // Estimate (LM Studio has no exact count endpoint), using the bridge's calibrated ratio.
+    return json(res, 200, { input_tokens: Math.round(anthropicChars(body) * tokensPerChar) });
+  }
+
+  try {
+    await ensureModelLoaded(model, () => {});
+  } catch (e) {
+    log('model load: ' + e.message);
+  }
+  log(
+    `Claude Code: ${body.messages.length} messages, ${(body.tools || []).length} tools, ~${Math.round(
+      anthropicChars(body) * tokensPerChar
+    )} tokens -> ${model}`
+  );
+
+  const ac = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) ac.abort();
+  });
+  let upstream;
+  try {
+    upstream = await fetch(cfg.lmStudioUrl + '/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'anthropic-version': req.headers['anthropic-version'] || '2023-06-01' },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    return json(res, 502, { type: 'error', error: { type: 'api_error', message: friendlyError(e) } });
+  }
+  if (!upstream.ok) {
+    const text = await upstream.text().catch(() => '');
+    log(`Claude Code: LM Studio returned ${upstream.status}: ${text.slice(0, 300)}`);
+    res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') || 'application/json' });
+    return res.end(text);
+  }
+  res.writeHead(200, {
+    'Content-Type': upstream.headers.get('content-type') || 'application/json',
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no',
+  });
+  try {
+    for await (const chunk of upstream.body) res.write(chunk);
+  } catch (e) {
+    if (!ac.signal.aborted) log('Claude Code stream error: ' + e.message);
+  }
+  res.end();
+}
+
 function openEventStream(res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1262,9 +1362,11 @@ function noteFailure(addr) {
   else f.count++;
 }
 function checkAuth(req) {
+  // The site and ANTHROPIC_AUTH_TOKEN send "Authorization: Bearer <token>"; ANTHROPIC_API_KEY sends "x-api-key".
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
-  if (!m) return false;
-  const a = Buffer.from(m[1].trim());
+  const given = m ? m[1].trim() : String(req.headers['x-api-key'] || '').trim();
+  if (!given) return false;
+  const a = Buffer.from(given);
   const b = Buffer.from(cfg.accessToken);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
@@ -1299,6 +1401,30 @@ const server = http.createServer(async (req, res) => {
         return await handleChat(req, res);
       case 'POST /api/compact':
         return await handleCompact(req, res);
+      // Claude-format API, so Claude Code can use the local model (see cli/claude-local.*).
+      case 'POST /v1/messages':
+      case 'POST /v1/messages/count_tokens':
+        return await handleAnthropic(req, res, url.pathname.replace(/\/+$/, ''));
+      case 'GET /v1/models':
+        return json(res, 200, { data: (await listModels()).map((m) => ({ type: 'model', id: m.id, display_name: m.id })), has_more: false });
+      case 'GET /api/claude-code': {
+        // What the launcher scripts need: the model to use and its context size, as KEY=VALUE lines.
+        const model = await resolveModel(url.searchParams.get('model'));
+        let ctx = (await loadedContext(model)) || 0;
+        if (!ctx && model && url.searchParams.get('load') === '1') {
+          // Not in memory: load it (the bridge's cap if set, else LM Studio's saved settings) to learn its context.
+          await ensureModelLoaded(model, () => {}).catch(() => {});
+          await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, max_tokens: 1, reasoning_effort: 'none', messages: [{ role: 'user', content: 'hi' }] }),
+            signal: AbortSignal.timeout(180000),
+          }).catch(() => {});
+          ctx = (await loadedContext(model)) || 0;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end(`MODEL=${model || ''}\nCONTEXT=${ctx}\n`);
+      }
       case 'GET /api/projects':
         return json(res, 200, { root: cfg.projectsRootAbs || null, projects: await listProjects() });
       case 'POST /api/projects': {
@@ -1327,7 +1453,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize };
+module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages };
 
 if (require.main === module) server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);
