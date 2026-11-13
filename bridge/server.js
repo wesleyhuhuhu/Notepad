@@ -41,6 +41,10 @@ const DEFAULTS = {
   // A number = an upper limit: if the model is loaded with a bigger context, or not loaded,
   // the bridge loads it with this context instead (e.g. 16384 while a game uses the GPU).
   contextLength: 0,
+  // Compaction: when a chat passes this share of the model's context, the older part is
+  // summarized (like Claude Code's auto-compact) so the chat can keep going.
+  autoCompact: true,
+  compactAt: 0.7,
   accessToken: '',
 };
 
@@ -215,9 +219,9 @@ async function listProjectFiles(dir, sub) {
   return lines.join('\n') + (truncated ? `\n[...stopped at ${LIMIT} entries; list a subfolder to see more]` : '');
 }
 
-const READ_CHARS = 6000;
+const READ_CHARS = 12000;
 
-async function readProjectFile(dir, rel, startLine) {
+async function readProjectFile(dir, rel, startLine, endLine) {
   if (!rel) throw new Error('path is required.');
   const { real } = await resolveInProject(dir, rel);
   if (SECRET_FILE_RE.test(path.basename(real))) throw new Error('That file may contain secrets and cannot be read.');
@@ -228,15 +232,76 @@ async function readProjectFile(dir, rel, startLine) {
   if (buf.subarray(0, 8000).includes(0)) return `(binary file, ${fmtSize(st.size)})`;
   const all = buf.toString('utf8').split(/\r?\n/);
   const start = Math.max(1, Number.isInteger(startLine) ? startLine : 1);
+  const end = Math.min(all.length, Number.isInteger(endLine) && endLine >= start ? endLine : all.length);
+  if (start > all.length) return `(the file has only ${all.length} lines)`;
   let out = '';
   let i = start - 1;
-  for (; i < all.length; i++) {
+  for (; i < end; i++) {
     const line = `${i + 1}: ${all[i]}\n`;
     if (out.length + line.length > READ_CHARS && out) break;
     out += line;
   }
-  if (i < all.length) out += `[...file continues, ${all.length} lines total; call again with start_line=${i + 1}]`;
+  if (i < end) out += `[...stopped at line ${i} to save space; ${all.length} lines total. Call again with start_line=${i + 1}]`;
+  else if (end < all.length) out += `[${all.length} lines total]`;
   return out || '(empty file)';
+}
+
+// Search text files in a project for a word or phrase (or a regular expression).
+async function searchProject(dir, query, sub, isRegex, maxResults) {
+  if (typeof query !== 'string' || !query.trim()) throw new Error('query is required.');
+  let re;
+  try {
+    re = isRegex ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  } catch (e) {
+    throw new Error('Invalid regular expression: ' + e.message);
+  }
+  const { real, base } = await resolveInProject(dir, sub);
+  const limit = Math.min(Math.max(Number.isInteger(maxResults) ? maxResults : 50, 1), 150);
+  const hits = [];
+  const filesWithHits = new Set();
+  let total = 0;
+  let filesScanned = 0;
+  async function scanFile(abs) {
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st || st.size > 1024 * 1024) return;
+    const buf = await fsp.readFile(abs).catch(() => null);
+    if (!buf || buf.subarray(0, 8000).includes(0)) return;
+    filesScanned++;
+    const rel = path.relative(base, abs).split(path.sep).join('/');
+    const lines = buf.toString('utf8').split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].length > 2000 ? lines[i].slice(0, 2000) : lines[i];
+      if (!re.test(line)) continue;
+      total++;
+      filesWithHits.add(rel);
+      if (hits.length < limit) hits.push(`${rel}:${i + 1}: ${line.trim().slice(0, 200)}`);
+    }
+  }
+  async function walk(abs, depth) {
+    if (filesScanned > 3000) return;
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st) return;
+    if (st.isFile()) {
+      if (!SECRET_FILE_RE.test(path.basename(abs))) await scanFile(abs);
+      return;
+    }
+    const entries = await fsp.readdir(abs, { withFileTypes: true }).catch(() => []);
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      const p = path.join(abs, e.name);
+      if (e.isDirectory()) {
+        if (!IGNORED_DIRS.has(e.name) && depth < 10) await walk(p, depth + 1);
+      } else if (e.isFile() && !SECRET_FILE_RE.test(e.name)) await scanFile(p);
+    }
+  }
+  await walk(real, 0);
+  if (!total) return `No matches for "${query}" (${filesScanned} files searched).`;
+  return (
+    `${total} match${total === 1 ? '' : 'es'} in ${filesWithHits.size} file${filesWithHits.size === 1 ? '' : 's'}` +
+    (total > hits.length ? ` (showing the first ${hits.length}; narrow the search or set path)` : '') +
+    ':\n' +
+    hits.join('\n')
+  );
 }
 
 // ------------------------------------------------------------ CLAUDE.md ---
@@ -341,10 +406,29 @@ function buildTools({ project, allowEdits, allowCode }) {
       fn('list_project_files', `List files and folders in project "${project}" (read-only).`, {
         path: { type: 'string', description: 'Subfolder relative to the project root. Omit for the whole project.' },
       }),
-      fn('read_project_file', `Read a text file in project "${project}" (read-only). Returns numbered lines.`, {
-        path: { type: 'string', description: 'File path relative to the project root, e.g. "src/main.py".' },
-        start_line: { type: 'integer', description: 'Line to start from, for long files. Default 1.' },
-      }, ['path'])
+      fn(
+        'search_project',
+        `Search the text files of project "${project}" for a word or phrase (case-insensitive). Returns matching lines as path:line: text. ` +
+          'Use it to find where something is defined or discussed before reading files, so you only read the parts you need.',
+        {
+          query: { type: 'string', description: 'Text to look for, e.g. "def login" or "database schema".' },
+          path: { type: 'string', description: 'Only search this subfolder or file. Omit to search the whole project.' },
+          regex: { type: 'boolean', description: 'Treat query as a regular expression. Default false.' },
+          max_results: { type: 'integer', description: 'Maximum matching lines to return (default 50, max 150).' },
+        },
+        ['query']
+      ),
+      fn(
+        'read_project_file',
+        `Read a text file in project "${project}" (read-only). Returns numbered lines. For long files, read only the lines you need ` +
+          '(use search_project to find them).',
+        {
+          path: { type: 'string', description: 'File path relative to the project root, e.g. "src/main.py".' },
+          start_line: { type: 'integer', description: 'First line to read. Default 1.' },
+          end_line: { type: 'integer', description: 'Last line to read. Default: as far as fits.' },
+        },
+        ['path']
+      )
     );
   }
   return tools;
@@ -387,7 +471,9 @@ async function runTool(name, args, ctx) {
     case 'list_project_files':
       return { ok: true, result: await listProjectFiles(ctx.projectDir, args.path) };
     case 'read_project_file':
-      return { ok: true, result: await readProjectFile(ctx.projectDir, args.path, args.start_line) };
+      return { ok: true, result: await readProjectFile(ctx.projectDir, args.path, args.start_line, args.end_line) };
+    case 'search_project':
+      return { ok: true, result: await searchProject(ctx.projectDir, args.query, args.path, args.regex === true, args.max_results) };
     default:
       return { ok: false, result: `Error: unknown tool "${name}".` };
   }
@@ -402,7 +488,7 @@ function inline(md, max, missing) {
   return md;
 }
 
-function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra }) {
+function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra, summary }) {
   const L = [
     "You are a helpful assistant running locally on the user's own computer through LM Studio.",
     'You have memory files called CLAUDE.md. Follow the instructions in them.',
@@ -422,7 +508,10 @@ function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdit
       '</project_claude_md>'
     );
     if (allowCode)
-      L.push('You can look at the project with list_project_files and read_project_file. You cannot change project files other than CLAUDE.md.');
+      L.push(
+        'You can look at the project with list_project_files, search_project and read_project_file. You cannot change project files other than CLAUDE.md.',
+        'Your context window is limited: use search_project to find what you need and read only those lines, instead of reading whole large files.'
+      );
   }
   L.push('');
   if (allowEdits) {
@@ -441,6 +530,15 @@ function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdit
     L.push('CLAUDE.md files are read-only in this chat. If asked to change one, explain that edits are turned off.');
   }
   if (extra && typeof extra === 'string' && extra.trim()) L.push('', extra.trim());
+  if (summary)
+    L.push(
+      '',
+      'Earlier parts of this conversation were compacted to save space. This summary covers everything before the messages that follow:',
+      '<conversation_summary>',
+      summary,
+      '</conversation_summary>',
+      'Continue from where the conversation left off, using the summary as if you remembered it.'
+    );
   return L.join('\n');
 }
 
@@ -487,8 +585,222 @@ function sanitizeHistory(messages) {
     .map((m) => {
       if (Array.isArray(m.content)) return { role: 'user', content: sanitizeParts(m.content) };
       return { role: m.role, content: m.role === 'assistant' ? stripThink(m.content) : m.content };
-    })
-    .slice(-40);
+    });
+}
+
+// The browser sends the latest compaction summary as a { role: 'summary' } message.
+function lastSummary(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === 'summary' && typeof m.content === 'string') return m.content;
+  }
+  return '';
+}
+
+// ------------------------------------------------------- token estimates ---
+// LM Studio only reports exact counts after a request, so before one the bridge estimates
+// from text length, and recalibrates the ratio from the real counts it gets back.
+
+let tokensPerChar = 0.3;
+const PER_MESSAGE_TOKENS = 8;
+
+// Width/height from a base64 JPEG or PNG data URL (the browser sends JPEGs).
+function imageSize(dataUrl) {
+  try {
+    const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1, dataUrl.indexOf(',') + 1 + 65536);
+    const b = Buffer.from(b64.slice(0, b64.length - (b64.length % 4)), 'base64');
+    if (b[0] === 0x89 && b[1] === 0x50) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+    if (b[0] === 0xff && b[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const marker = b[i + 1];
+        const len = b.readUInt16BE(i + 2);
+        if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker))
+          return { h: b.readUInt16BE(i + 5), w: b.readUInt16BE(i + 7) };
+        i += 2 + len;
+      }
+    }
+  } catch {}
+  return { w: 1024, h: 1024 };
+}
+
+// Measured on Qwen3.8 27B in LM Studio: one token per ~32x32 pixels (1280x800 = ~1,000 tokens).
+const pixelsPerImageToken = 32 * 32;
+const imageTokens = (url) => {
+  const { w, h } = imageSize(url);
+  return Math.ceil((w * h) / pixelsPerImageToken) + 4;
+};
+
+// Returns { chars, images } for one chat message (text characters and image tokens).
+function messageWeight(m) {
+  if (typeof m.content === 'string') return { chars: m.content.length, images: 0 };
+  let chars = 0;
+  let images = 0;
+  for (const p of m.content || []) {
+    if (p.type === 'text') chars += p.text.length;
+    else if (p.type === 'image_url') images += imageTokens(p.image_url.url);
+  }
+  return { chars, images };
+}
+
+function estimate(messages, tools) {
+  let chars = tools ? JSON.stringify(tools).length : 0;
+  let images = 0;
+  for (const m of messages) {
+    const w = messageWeight(m);
+    chars += w.chars;
+    images += w.images;
+  }
+  const tokens = Math.round(chars * tokensPerChar + images + messages.length * PER_MESSAGE_TOKENS);
+  return { tokens, chars, images, count: messages.length };
+}
+
+const estimateMessage = (m) => estimate([m]).tokens;
+
+// After a real request: nudge the ratio toward what LM Studio actually counted.
+function calibrate(est, promptTokens) {
+  if (!promptTokens || est.chars < 3000) return;
+  const textTokens = promptTokens - est.images - est.count * PER_MESSAGE_TOKENS;
+  const ratio = textTokens / est.chars;
+  if (ratio > 0.12 && ratio < 0.7) tokensPerChar = tokensPerChar * 0.5 + ratio * 0.5;
+}
+
+async function loadedContext(model) {
+  try {
+    const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(5000) });
+    const m = ((await r.json()).data || []).find((x) => x.id === model);
+    if (m && m.state === 'loaded' && m.loaded_context_length) return m.loaded_context_length;
+  } catch {}
+  return cfg.contextLength || null;
+}
+
+// ------------------------------------------------------------ compaction ---
+// Like Claude Code's compaction: the model writes a structured summary of the older part of
+// the chat, and the summary replaces it. CLAUDE.md files are re-read on every message, so
+// nothing in them is lost; the summary's Progress section can also be saved to CLAUDE.md.
+
+const SUMMARY_MAX_TOKENS = 3500;
+
+const SUMMARY_SYSTEM = [
+  'You compact long conversations between a user and an AI assistant so the work can continue in a fresh context window.',
+  'Write a summary that lets the assistant carry on as if it had read the whole conversation.',
+  'Be specific: keep names, numbers, file paths, commands, error messages, decisions and the reasons for them, and the user\'s preferences.',
+  'Leave out greetings, filler, and finished detours that do not matter for what comes next. Do not invent anything.',
+  '',
+  'Use exactly these markdown sections:',
+  '## Goal and requests',
+  '(what the user is trying to achieve, and every request they made, including the latest one)',
+  '## Key facts and decisions',
+  '## Files and code',
+  '(file paths, what was read or changed, short code snippets only when essential)',
+  '## Problems and fixes',
+  '## Current state',
+  '(exactly what was being worked on when the conversation was compacted)',
+  '## Next steps',
+  '## Progress',
+  '(a status note of at most 120 words: what is done, what is in progress, what is next. It is saved in the project\'s CLAUDE.md)',
+  '',
+  'Write at most about 1,500 words. Output only the summary, starting with "## Goal and requests".',
+].join('\n');
+
+function transcriptOf(m) {
+  if (typeof m.content === 'string') return `[${m.role === 'user' ? 'User' : 'Assistant'}]\n${m.content}`;
+  const text = (m.content || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+  const n = (m.content || []).filter((p) => p.type === 'image_url').length;
+  return `[User]\n${text}${n ? `\n[${n} image${n === 1 ? '' : 's'} attached; you can no longer see them]` : ''}`;
+}
+
+async function summaryCall(model, userPrompt, signal) {
+  const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      stream: false,
+      // No thinking: it would use thousands of tokens of the little room that is left.
+      reasoning_effort: 'none',
+      temperature: 0.3,
+      max_tokens: SUMMARY_MAX_TOKENS,
+      messages: [
+        { role: 'system', content: SUMMARY_SYSTEM },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+    signal,
+  });
+  if (!r.ok) throw new Error(`LM Studio returned ${r.status} while summarizing: ${(await r.text().catch(() => '')).slice(0, 300)}`);
+  const j = await r.json();
+  const text = stripThink((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '');
+  if (!text) throw new Error('The model returned an empty summary.');
+  return text;
+}
+
+// Summarizes `messages` (plus an earlier summary, if any). Long transcripts are summarized in
+// pieces, each piece folded into the running summary, so it works even near the context limit.
+async function summarize({ messages, previous, instructions, model, ctxLen, signal, onStatus }) {
+  const budgetTokens = Math.max(4000, ctxLen - SUMMARY_MAX_TOKENS - 1500 - (previous ? estimateMessage({ content: previous }) : 0) - 1000);
+  const budgetChars = Math.floor(budgetTokens / tokensPerChar);
+  const pieces = [];
+  let cur = '';
+  for (const m of messages) {
+    let t = transcriptOf(m) + '\n\n';
+    while (t.length > budgetChars) {
+      if (cur) { pieces.push(cur); cur = ''; }
+      pieces.push(t.slice(0, budgetChars));
+      t = t.slice(budgetChars);
+    }
+    if (cur.length + t.length > budgetChars) { pieces.push(cur); cur = ''; }
+    cur += t;
+  }
+  if (cur) pieces.push(cur);
+
+  let summary = previous || '';
+  for (let i = 0; i < pieces.length; i++) {
+    onStatus(pieces.length > 1 ? `Compacting the conversation (part ${i + 1} of ${pieces.length})…` : 'Compacting the conversation to free up context…');
+    const prompt = [
+      summary
+        ? `Summary of the conversation so far:\n<summary>\n${summary}\n</summary>\n\nThe conversation then continued:`
+        : 'The conversation:',
+      '<conversation>',
+      pieces[i].trim(),
+      '</conversation>',
+      instructions ? `\nWhen summarizing, pay special attention to: ${instructions}` : '',
+      summary
+        ? '\nWrite one updated summary that merges the earlier summary with the new part.'
+        : '\nWrite the summary.',
+    ].join('\n');
+    summary = await summaryCall(model, prompt, signal);
+  }
+  return summary;
+}
+
+// Puts the summary's Progress section into a CLAUDE.md, replacing any earlier one.
+async function saveProgress(target, summary) {
+  const lines = summary.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^##\s+Progress\b/i.test(l));
+  if (start < 0) return false;
+  let end = lines.findIndex((l, i) => i > start && /^##\s/.test(l));
+  if (end < 0) end = lines.length;
+  const body = lines.slice(start + 1, end).join('\n').trim();
+  if (!body) return false;
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const section = `## Progress\n_Saved ${stamp} when a chat was compacted._\n\n${body}\n`;
+
+  const md = (await readMd(target)) || '';
+  const mdLines = md.split(/\r?\n/);
+  const s = mdLines.findIndex((l) => /^##\s+Progress\b/i.test(l));
+  let next;
+  if (s >= 0) {
+    let e = mdLines.findIndex((l, i) => i > s && /^##\s/.test(l));
+    if (e < 0) e = mdLines.length;
+    next = [...mdLines.slice(0, s), ...section.trimEnd().split('\n'), '', ...mdLines.slice(e)].join('\n');
+  } else {
+    next = md.replace(/\s*$/, '') + (md.trim() ? '\n\n' : '') + section;
+  }
+  await writeMd(target, next.replace(/\n{3,}/g, '\n\n').replace(/\s*$/, '') + '\n', 'compaction (progress)');
+  return true;
 }
 
 // ------------------------------------------------------- LM Studio call ---
@@ -497,7 +809,7 @@ async function streamCompletion(payload, send, signal) {
   const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...payload, stream: true }),
+    body: JSON.stringify({ ...payload, stream: true, stream_options: { include_usage: true } }),
     signal,
   });
   if (!r.ok) {
@@ -508,6 +820,7 @@ async function streamCompletion(payload, send, signal) {
   const dec = new TextDecoder();
   let buf = '';
   let content = '';
+  let usage = null;
   const calls = [];
 
   const handleLine = (line) => {
@@ -522,6 +835,7 @@ async function streamCompletion(payload, send, signal) {
       return;
     }
     if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+    if (j.usage) usage = j.usage;
     const ch = j.choices && j.choices[0];
     if (!ch) return;
     const d = ch.delta || {};
@@ -553,7 +867,7 @@ async function streamCompletion(payload, send, signal) {
   }
   if (buf) handleLine(buf);
 
-  return { content, toolCalls: calls.filter((c) => c && c.name) };
+  return { content, usage, toolCalls: calls.filter((c) => c && c.name) };
 }
 
 // ------------------------------------------------------------- handlers ---
@@ -576,20 +890,7 @@ async function handleChat(req, res) {
   const tools = buildTools({ project, allowEdits, allowCode });
   const ctx = { project, projectDir, projectTarget, globalTarget };
 
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  const send = (obj) => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  };
-  const ac = new AbortController();
-  res.on('close', () => {
-    if (!res.writableEnded) ac.abort();
-  });
-  const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+  const { send, ac, finish } = openEventStream(res);
 
   try {
     const model = await resolveModel(body.model);
@@ -599,31 +900,62 @@ async function handleChat(req, res) {
       log('model load: ' + e.message);
       send({ type: 'status', text: '' });
     }
-    const messages = [
-      {
-        role: 'system',
-        content: buildSystemPrompt({
-          globalMd: await readMd(globalTarget),
-          project,
-          projectDir,
-          projectMd: projectTarget ? await readMd(projectTarget) : null,
-          allowEdits,
-          allowCode,
-          extra: body.system,
-        }),
-      },
-      ...sanitizeHistory(body.messages),
-    ];
+    const ctxLen = await loadedContext(model);
+    const globalMd = await readMd(globalTarget);
+    const projectMd = projectTarget ? await readMd(projectTarget) : null;
+    const systemFor = (summary) =>
+      buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra: body.system, summary });
+
+    let summary = lastSummary(body.messages);
+    let history = sanitizeHistory(body.messages);
+    let est = estimate([{ role: 'system', content: systemFor(summary) }, ...history], tools);
+
+    // Auto-compaction: summarize the older part of the chat once it passes compactAt of the context.
+    if (cfg.autoCompact && ctxLen && history.length >= 2 && est.tokens > ctxLen * cfg.compactAt) {
+      // Keep the newest messages word for word: always the new user message, plus up to three
+      // more while they fit in a fifth of the context. The kept part starts with a user message.
+      let keep = 1;
+      let kept = estimateMessage(history[history.length - 1]);
+      while (keep < 4 && keep < history.length - 1) {
+        const t = estimateMessage(history[history.length - 1 - keep]);
+        if (kept + t > ctxLen * 0.2) break;
+        kept += t;
+        keep++;
+      }
+      while (keep > 1 && history[history.length - keep].role !== 'user') keep--;
+      const count = history.length - keep;
+      if (count > 0) {
+        const before = est.tokens;
+        const status = (text) => send({ type: 'status', text });
+        summary = await summarize({ messages: history.slice(0, count), previous: summary, model, ctxLen, signal: ac.signal, onStatus: status });
+        history = history.slice(count);
+        est = estimate([{ role: 'system', content: systemFor(summary) }, ...history], tools);
+        const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
+        if (progressSaved) send({ type: 'claude_md_updated', scope: 'project', project });
+        send({ type: 'compacted', summary, count, tokensBefore: before, tokensAfter: est.tokens, context: ctxLen, auto: true, progressSaved });
+        send({ type: 'status', text: '' });
+        log(`Compacted ${count} messages: ~${before} -> ~${est.tokens} tokens${progressSaved ? ' (progress saved)' : ''}`);
+      }
+    }
+    send({ type: 'context', estimate: est.tokens, context: ctxLen });
+
+    const messages = [{ role: 'system', content: systemFor(summary) }, ...history];
     const extra = {};
     if (typeof body.temperature === 'number') extra.temperature = body.temperature;
 
     for (let round = 0; round <= cfg.maxToolRounds; round++) {
       const useTools = round < cfg.maxToolRounds;
-      const { content, toolCalls } = await streamCompletion(
+      const roundEst = round === 0 ? estimate(messages, useTools ? tools : null) : null;
+      const { content, toolCalls, usage } = await streamCompletion(
         { model, messages, ...(useTools ? { tools } : {}), ...extra },
         send,
         ac.signal
       );
+      if (usage) {
+        if (roundEst) calibrate(roundEst, usage.prompt_tokens);
+        const reasoning = (usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens) || 0;
+        send({ type: 'usage', prompt: usage.prompt_tokens, completion: usage.completion_tokens, reasoning, context: ctxLen });
+      }
       if (!toolCalls.length) break;
 
       messages.push({
@@ -677,8 +1009,74 @@ async function handleChat(req, res) {
       send({ type: 'error', message: friendlyError(e) });
     }
   } finally {
+    finish();
+  }
+}
+
+function openEventStream(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const send = (obj) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
+  const ac = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) ac.abort();
+  });
+  const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+  const finish = () => {
     clearInterval(ping);
     res.end();
+  };
+  return { send, ac, finish };
+}
+
+// Manual compaction (the site's Compact button, like Claude Code's /compact): summarizes the
+// whole chat so far, optionally focusing on what the user asks for.
+async function handleCompact(req, res) {
+  const body = await readJson(req, 64 * 1024 * 1024);
+  const project = typeof body.project === 'string' && body.project ? body.project : null;
+  const projectTarget = project ? await mdTarget(project) : null;
+  const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
+  const previous = lastSummary(body.messages);
+  const history = sanitizeHistory(body.messages);
+  if (!history.length) throw httpError(400, previous ? 'Nothing new to compact since the last summary.' : 'This chat is empty.');
+  const instructions = typeof body.instructions === 'string' ? body.instructions.trim().slice(0, 2000) : '';
+
+  const { send, ac, finish } = openEventStream(res);
+  try {
+    const model = await resolveModel(body.model);
+    try {
+      if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
+    } catch {}
+    const ctxLen = (await loadedContext(model)) || 16384;
+    const before = estimate([...(previous ? [{ content: previous }] : []), ...history]).tokens;
+    const summary = await summarize({
+      messages: history,
+      previous,
+      instructions,
+      model,
+      ctxLen,
+      signal: ac.signal,
+      onStatus: (text) => send({ type: 'status', text }),
+    });
+    const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
+    if (progressSaved) send({ type: 'claude_md_updated', scope: 'project', project });
+    const after = estimateMessage({ content: summary });
+    send({ type: 'compacted', summary, count: history.length, tokensBefore: before, tokensAfter: after, context: ctxLen, auto: false, progressSaved });
+    log(`Compacted ${history.length} messages on request: ~${before} -> ~${after} tokens${progressSaved ? ' (progress saved)' : ''}`);
+    send({ type: 'done' });
+  } catch (e) {
+    if (!ac.signal.aborted) {
+      log('compact error: ' + e.message);
+      send({ type: 'error', message: friendlyError(e) });
+    }
+  } finally {
+    finish();
   }
 }
 
@@ -688,6 +1086,8 @@ function summarizeArgs(args) {
   if (typeof args.scope === 'string') out.scope = args.scope;
   if (typeof args.path === 'string') out.path = args.path.slice(0, 200);
   if (Number.isInteger(args.start_line)) out.start_line = args.start_line;
+  if (Number.isInteger(args.end_line)) out.end_line = args.end_line;
+  if (typeof args.query === 'string') out.query = args.query.slice(0, 120);
   return out;
 }
 
@@ -704,6 +1104,8 @@ async function handleStatus(res) {
     defaultModel: cfg.model || null,
     allowModelEdits: cfg.allowModelEdits,
     allowCodeReading: cfg.allowCodeReading,
+    autoCompact: cfg.autoCompact,
+    compactAt: cfg.compactAt,
     projectsRoot: cfg.projectsRootAbs || null,
     globalClaudeMd: cfg.claudeMdAbs,
   });
@@ -772,7 +1174,12 @@ async function listModels() {
       const j = await r.json();
       return (j.data || [])
         .filter((m) => m.type !== 'embeddings')
-        .map((m) => ({ id: m.id, loaded: m.state === 'loaded', vision: m.type === 'vlm' }));
+        .map((m) => ({
+          id: m.id,
+          loaded: m.state === 'loaded',
+          vision: m.type === 'vlm',
+          context: m.state === 'loaded' ? m.loaded_context_length || null : null,
+        }));
     }
   } catch (e) {
     if (e.name === 'TimeoutError') throw e;
@@ -890,6 +1297,8 @@ const server = http.createServer(async (req, res) => {
         return await handleStatus(res);
       case 'POST /api/chat':
         return await handleChat(req, res);
+      case 'POST /api/compact':
+        return await handleCompact(req, res);
       case 'GET /api/projects':
         return json(res, 200, { root: cfg.projectsRootAbs || null, projects: await listProjects() });
       case 'POST /api/projects': {
@@ -918,7 +1327,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-module.exports = { listProjectFiles, readProjectFile, getProjectDir, validProjectName };
+module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize };
 
 if (require.main === module) server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);

@@ -112,6 +112,20 @@ details.reasoning div { white-space: pre-wrap; border-left: 2px solid var(--bord
 .tool.bad::before { content: "✕"; color: var(--bad); }
 .tool.pending::before { content: "…"; }
 .err { color: var(--bad); font-size: 14px; }
+.msg.archived { opacity: .45; }
+.msg.summary details {
+  border: 1px dashed var(--border); border-radius: var(--radius); padding: 8px 12px; background: var(--panel);
+}
+.msg.summary summary { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; }
+.msg.summary .body { margin-top: 10px; font-size: 14px; }
+.ctx { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
+.ctx .bar { width: 64px; height: 6px; border-radius: 3px; background: var(--chip); border: 1px solid var(--border); overflow: hidden; }
+.ctx .bar i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .3s; }
+.ctx.warn .bar i { background: var(--warn); }
+.ctx.full .bar i { background: var(--bad); }
+.linkbtn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; }
+.linkbtn:disabled { color: var(--muted); }
+dialog .hint-top { font-size: 13.5px; color: var(--muted); margin: -6px 0 14px; }
 .notice { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 8px; }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--muted); }
 @keyframes blink { 50% { opacity: 0; } }
@@ -211,6 +225,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       <div class="inner meta">
         <label title="Model to use">Model <select id="model"><option value="">(default)</option></select></label>
         <label title="Let the model change CLAUDE.md files with tools"><input type="checkbox" id="allowEdits" checked> Model can edit CLAUDE.md</label>
+        <span class="ctx" id="ctxMeter" hidden><span class="bar"><i id="ctxFill"></i></span><span id="ctxText"></span></span>
+        <button type="button" class="linkbtn" id="btnCompact" title="Summarize this chat so far to free up context">Compact</button>
       </div>
     </div>
   </div>
@@ -250,6 +266,25 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       <span class="grow err" id="npResult"></span>
       <button value="cancel" formnovalidate>Cancel</button>
       <button type="button" class="primary" id="npCreate">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="compactDlg">
+  <form method="dialog">
+    <h2>Compact this chat</h2>
+    <p class="hint-top">The model writes a summary of the conversation so far, and the summary replaces it, freeing up context. Earlier messages stay visible but are no longer sent. CLAUDE.md files are always kept.</p>
+    <div class="field">
+      <label for="cpFocus">Anything the summary should focus on? (optional)</label>
+      <textarea id="cpFocus" rows="2" placeholder="e.g. keep the details of the login bug and the database schema"></textarea>
+    </div>
+    <div class="field check" id="cpSaveRow">
+      <label><input type="checkbox" id="cpSave" checked> Save progress to this project's CLAUDE.md</label>
+    </div>
+    <div class="row">
+      <span class="grow" id="cpResult"></span>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button type="button" class="primary" id="cpGo">Compact</button>
     </div>
   </form>
 </dialog>
@@ -369,6 +404,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       }
       fillModels(status);
       updateAttach();
+      updateMeter();
       $('allowEdits').disabled = !status.allowModelEdits;
       if (!status.allowModelEdits) $('allowEdits').checked = false;
       return status;
@@ -467,7 +503,12 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       case 'replace_in_claude_md': return 'Edited CLAUDE.md' + g;
       case 'write_claude_md': return 'Wrote CLAUDE.md' + g;
       case 'list_project_files': return 'Listed ' + ((t.args && t.args.path) || 'project files');
-      case 'read_project_file': return 'Read ' + ((t.args && t.args.path) || 'a file');
+      case 'search_project': return 'Searched for "' + ((t.args && t.args.query) || '') + '"' + (t.args && t.args.path ? ' in ' + t.args.path : '');
+      case 'read_project_file': {
+        const a = t.args || {};
+        const range = a.start_line || a.end_line ? ` (lines ${a.start_line || 1}–${a.end_line || 'end'})` : '';
+        return 'Read ' + (a.path || 'a file') + range;
+      }
       default: return t.name;
     }
   }
@@ -564,16 +605,33 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         div.innerHTML = '<h2>Your model, from anywhere</h2><p>Pick a project at the top to give the model that project\'s CLAUDE.md and code, or just chat. The global CLAUDE.md is always included.</p>';
       }
       list.appendChild(div);
+      updateMeter();
       return;
     }
     for (const m of messages) list.appendChild(msgEl(m));
     scrollDown(true);
+    updateMeter();
   }
+
+  const elOf = new WeakMap(); // message object -> its element
+  const kTok = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(Math.round(n || 0)));
 
   function msgEl(m, streaming) {
     const el = document.createElement('div');
-    el.className = 'msg ' + m.role;
-    if (m.role === 'user') {
+    el.className = 'msg ' + m.role + (m.archived ? ' archived' : '');
+    elOf.set(m, el);
+    if (m.role === 'summary') {
+      const d = document.createElement('details');
+      const s = document.createElement('summary');
+      s.textContent =
+        `Context compacted${m.auto ? ' automatically' : ''} · ${m.count} earlier message${m.count === 1 ? '' : 's'} summarized` +
+        (m.tokensBefore ? ` · about ${kTok(m.tokensBefore)} → ${kTok(m.tokensAfter)} tokens` : '') +
+        (m.progressSaved ? ' · progress saved to CLAUDE.md' : '');
+      const b = div('body');
+      b.innerHTML = md(m.content);
+      d.append(s, b);
+      el.appendChild(d);
+    } else if (m.role === 'user') {
       const b = div('bubble');
       if (m.attachments && m.attachments.length) {
         const t = div('thumbs');
@@ -628,7 +686,187 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
   });
 
-  const save = (key, msgs) => store.set(key, msgs.slice(-100));
+  // Keep at most 120 messages per chat in this browser, dropping compacted ones first.
+  const save = (key, msgs) => {
+    let out = msgs;
+    while (out.length > 120) {
+      const i = out.findIndex((m) => m.archived);
+      if (i < 0) break;
+      out = out.slice(0, i).concat(out.slice(i + 1));
+    }
+    store.set(key, out.slice(-120));
+  };
+
+  // ------------------------------------------------------- compaction --
+  // What gets sent: the latest summary (if any) plus the messages after it that aren't compacted.
+  function sendable(chat) {
+    let s = -1;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (chat[i].role === 'summary' && !chat[i].archived) { s = i; break; }
+    }
+    const live = chat.slice(s + 1).filter((m) => m.role !== 'summary' && !m.archived && (m.role === 'user' || m.content));
+    return { summary: s >= 0 ? chat[s] : null, live };
+  }
+  const payloadOf = (summary, live) => [
+    ...(summary ? [{ role: 'summary', content: summary.content }] : []),
+    ...live.map(apiMessage),
+  ];
+
+  // The bridge summarized the first `count` live messages: fade them, and insert the summary after them.
+  function applyCompaction(chat, ev, prev, live) {
+    const victims = live.slice(0, ev.count);
+    for (const m of victims) {
+      m.archived = true;
+      const e = elOf.get(m);
+      if (e) e.classList.add('archived');
+    }
+    if (prev) {
+      prev.archived = true;
+      const e = elOf.get(prev);
+      if (e) e.classList.add('archived');
+    }
+    const s = {
+      role: 'summary', content: ev.summary, auto: !!ev.auto, progressSaved: !!ev.progressSaved,
+      count: ev.count + ((prev && prev.count) || 0),
+      tokensBefore: ev.tokensBefore, tokensAfter: ev.tokensAfter, context: ev.context, at: Date.now(),
+    };
+    const last = victims[victims.length - 1];
+    chat.splice(last ? chat.indexOf(last) + 1 : chat.length, 0, s);
+    if (chat === messages) {
+      const lastEl = last && elOf.get(last);
+      if (lastEl && lastEl.isConnected) lastEl.after(msgEl(s));
+      else $('list').appendChild(msgEl(s));
+    }
+    return s;
+  }
+
+  // ------------------------------------------------------ context meter --
+  function loadedContext() {
+    if (!status || !status.lmStudio || !status.lmStudio.models) return null;
+    const models = status.lmStudio.models;
+    const id = $('model').value || status.defaultModel;
+    const m = (id && models.find((x) => x.id === id)) || models.find((x) => x.loaded);
+    return (m && m.context) || null;
+  }
+  // Rough count for chats with no real numbers yet: ~4 characters per token, ~1,000 per image,
+  // plus ~1,500 for the system prompt and CLAUDE.md files.
+  function roughTokens() {
+    const { summary, live } = sendable(messages);
+    let chars = summary ? summary.content.length : 0;
+    let images = 0;
+    for (const m of live) {
+      chars += (m.content || '').length;
+      for (const a of m.attachments || []) images += a.frames || 1;
+    }
+    return live.length || summary ? Math.round(chars / 4 + images * 1000 + 1500) : 0;
+  }
+  function meterInfo() {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.archived) continue;
+      if (m.role === 'summary') return { used: m.tokensAfter, ctx: m.context, approx: true };
+      if (m.role === 'assistant' && m.usage) return { used: m.usage.used, ctx: m.usage.context, peak: m.usage.peak, tools: (m.tools || []).length };
+      if (m.role === 'assistant' && m.ctxEstimate) return { used: m.ctxEstimate, ctx: m.ctxContext, approx: true };
+    }
+    return { used: roughTokens(), ctx: null, approx: true };
+  }
+  function updateMeter() {
+    const info = meterInfo();
+    const ctx = info.ctx || loadedContext();
+    const el = $('ctxMeter');
+    el.hidden = !ctx;
+    const live = sendable(messages).live.length;
+    $('btnCompact').disabled = !!busy || !live;
+    if (!ctx) return;
+    const pct = Math.min(1, (info.used || 0) / ctx);
+    const at = (status && status.compactAt) || 0.7;
+    el.className = 'ctx' + (pct >= 0.9 ? ' full' : pct >= at - 0.05 ? ' warn' : '');
+    $('ctxFill').style.width = (pct * 100).toFixed(1) + '%';
+    $('ctxText').textContent = `${info.approx ? '~' : ''}${kTok(info.used || 0)} / ${kTok(ctx)}`;
+    el.title =
+      `Context: about ${Math.round(info.used || 0).toLocaleString()} of ${ctx.toLocaleString()} tokens in use` +
+      (info.tools && info.peak > info.used + 1000 ? ` (up to ${info.peak.toLocaleString()} during the last reply, while it used tools)` : '') +
+      '.' +
+      (status && status.autoCompact ? ` Older messages are compacted automatically past ${Math.round(at * 100)}%.` : '');
+  }
+
+  // Reads the bridge's event stream, calling onEvent for each event. Errors thrown by onEvent stop it.
+  async function readEvents(r, onEvent) {
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+          onEvent(ev);
+        }
+      }
+    }
+  }
+
+  function openCompact() {
+    if (busy) return;
+    const { summary, live } = sendable(messages);
+    $('cpResult').textContent = live.length ? '' : summary ? 'Nothing new since the last compaction.' : 'This chat is empty.';
+    $('cpGo').disabled = !live.length;
+    $('cpSaveRow').hidden = !project || !$('allowEdits').checked;
+    $('compactDlg').showModal();
+  }
+
+  async function runCompact() {
+    const chat = messages;
+    const chatKey = historyKey();
+    const { summary: prev, live } = sendable(chat);
+    if (!live.length) return;
+    busy = new AbortController();
+    $('cpGo').disabled = true;
+    $('send').textContent = 'Stop';
+    $('cpResult').textContent = 'Starting…';
+    updateMeter();
+    try {
+      const r = await api('/api/compact', {
+        method: 'POST',
+        signal: busy.signal,
+        body: JSON.stringify({
+          messages: payloadOf(prev, live),
+          project: project || undefined,
+          model: $('model').value || undefined,
+          instructions: $('cpFocus').value,
+          saveProgress: $('cpSave').checked,
+          allowEdits: $('allowEdits').checked,
+        }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Bridge error ' + r.status);
+      let done = false;
+      await readEvents(r, (ev) => {
+        if (ev.type === 'status' && ev.text) $('cpResult').textContent = ev.text;
+        else if (ev.type === 'compacted') { applyCompaction(chat, ev, prev, live); done = true; }
+        else if (ev.type === 'claude_md_updated') mdUpdated(ev);
+        else if (ev.type === 'error') throw new Error(ev.message);
+      });
+      if (!done) throw new Error('The bridge stopped before finishing the summary.');
+      save(chatKey, chat);
+      $('cpFocus').value = '';
+      $('compactDlg').close();
+      scrollDown(true);
+    } catch (e) {
+      $('cpResult').textContent = e.name === 'AbortError' ? 'Stopped.' : /fetch|network|load failed/i.test(e.message) ? 'Could not reach your PC.' : e.message;
+    } finally {
+      busy = null;
+      $('send').textContent = 'Send';
+      $('cpGo').disabled = false;
+      updateMeter();
+    }
+  }
 
   // ------------------------------------------------------- attachments --
   // Images are shrunk in the browser before sending (fewer tokens, faster upload).
@@ -820,6 +1058,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
     chat.push(user);
     $('list').appendChild(msgEl(user));
+    const { summary: prevSummary, live } = sendable(chat);
     const a = { role: 'assistant', content: '', reasoning: '', tools: [] };
     chat.push(a);
     const el = msgEl(a, true);
@@ -828,16 +1067,16 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
     busy = new AbortController();
     $('send').textContent = 'Stop';
+    updateMeter();
     let frame = 0;
     const paint = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderAssistant(el, a, true); scrollDown(); }); };
 
     try {
-      const history = chat.slice(0, -1).filter((m) => !m.error || m.content).map(apiMessage);
       const r = await api('/api/chat', {
         method: 'POST',
         signal: busy.signal,
         body: JSON.stringify({
-          messages: history,
+          messages: payloadOf(prevSummary, live),
           project: chatProject || undefined,
           model: $('model').value || undefined,
           allowEdits: $('allowEdits').checked,
@@ -848,26 +1087,24 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         const j = await r.json().catch(() => ({}));
         throw new Error(j.error || 'Bridge error ' + r.status);
       }
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf('\n\n')) >= 0) {
-          const chunk = buf.slice(0, i);
-          buf = buf.slice(i + 2);
-          for (const line of chunk.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            let ev;
-            try { ev = JSON.parse(line.slice(5)); } catch { continue; }
-            handleEvent(a, ev);
-          }
-        }
+      let firstPrompt = 0;
+      await readEvents(r, (ev) => {
+        if (ev.type === 'compacted') {
+          applyCompaction(chat, ev, prevSummary, live);
+          save(chatKey, chat);
+        } else if (ev.type === 'context') {
+          a.ctxEstimate = ev.estimate;
+          a.ctxContext = ev.context;
+        } else if (ev.type === 'usage') {
+          // What the next message will start from: this request's prompt plus the visible answer.
+          // Tool results from this reply are not sent again, so later steps only count as the peak.
+          if (!firstPrompt) firstPrompt = ev.prompt;
+          const peak = Math.max((a.usage && a.usage.peak) || 0, ev.prompt + ev.completion);
+          a.usage = { used: firstPrompt + Math.max(0, ev.completion - ev.reasoning), peak, context: ev.context || loadedContext() };
+        } else handleEvent(a, ev);
+        if (ev.type === 'compacted' || ev.type === 'context' || ev.type === 'usage') updateMeter();
         paint();
-      }
+      });
     } catch (e) {
       if (e.name !== 'AbortError') a.error = /Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach your PC. Is the bridge running?' : e.message;
       else if (!a.content) a.error = 'Stopped.';
@@ -878,7 +1115,16 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       renderAssistant(el, a, false);
       scrollDown();
       save(chatKey, chat);
+      updateMeter();
     }
+  }
+
+  function mdUpdated(ev) {
+    if (ev.scope === 'project') {
+      const p = projects.find((x) => x.name === ev.project);
+      if (p && !p.hasClaudeMd) { p.hasClaudeMd = true; fillProjects(); }
+    }
+    if ($('mdpanel').classList.contains('open') && ev.scope === mdScope) loadMd(true);
   }
 
   function handleEvent(a, ev) {
@@ -894,13 +1140,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         t.ok = ev.ok; t.result = ev.result;
         break;
       }
-      case 'claude_md_updated':
-        if (ev.scope === 'project') {
-          const p = projects.find((x) => x.name === ev.project);
-          if (p && !p.hasClaudeMd) { p.hasClaudeMd = true; fillProjects(); }
-        }
-        if ($('mdpanel').classList.contains('open') && ev.scope === mdScope) loadMd(true);
-        break;
+      case 'claude_md_updated': mdUpdated(ev); break;
       case 'status': a.notice = ev.text; break;
       case 'error': a.error = ev.message; break;
     }
@@ -1058,7 +1298,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('mdReload').addEventListener('click', () => { mdLoaded = $('mdtext').value; loadMd(); });
   $('mdSave').addEventListener('click', saveMd);
   $('mdGenerate').addEventListener('click', () => { if (window.innerWidth <= 860) $('mdpanel').classList.remove('open'); generateMd(); });
-  $('model').addEventListener('change', () => { store.set('model', $('model').value); updateAttach(); });
+  $('model').addEventListener('change', () => { store.set('model', $('model').value); updateAttach(); updateMeter(); });
+  $('btnCompact').addEventListener('click', openCompact);
+  $('cpGo').addEventListener('click', runCompact);
+  $('compactDlg').addEventListener('cancel', () => { if (busy) busy.abort(); });
   $('attach').addEventListener('click', () => $('fileInput').click());
   $('fileInput').addEventListener('change', () => { addFiles([...$('fileInput').files]); $('fileInput').value = ''; });
   $('input').addEventListener('paste', (e) => {

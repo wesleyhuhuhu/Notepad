@@ -13,6 +13,8 @@
   "maxToolRounds": 12,
   "maxBackups": 50,
   "contextLength": 0,
+  "autoCompact": true,
+  "compactAt": 0.7,
   "siteUrl": "",
   "accessToken": ""
 }

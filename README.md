@@ -45,6 +45,8 @@ Documents\Projects\
 - The **CLAUDE.md** button opens an editor with a project/global switch, so you can read and edit either file yourself.
 - Untick **Model can edit CLAUDE.md** under the message box to make the files read-only for a chat. `"allowModelEdits": false` turns edits off entirely; `"allowCodeReading": false` stops the model reading project code.
 
+To keep context small, the model has a **search tool** (`search_project`) that returns only matching lines, and it can read just a range of lines from a file. It's told to search first and read only what it needs, rather than whole files.
+
 What the model can and can't touch:
 - It can **read** files inside the selected project folder only. Paths outside it (`..\`, absolute paths, symlinks out) are refused.
 - It can't read `.env` files, private keys, certificates or similar secret files, and it skips folders like `.git`, `node_modules`, `bin`, `obj` and `venv`.
@@ -57,8 +59,25 @@ If the model can see images (LM Studio lists it as a vision model), attach them 
 - **Images** are shrunk in the browser to at most 1280 px on the longest side before sending.
 - **Video** is turned into still frames, about one per second, up to 8 frames, along with a note telling the model the timestamps. The model sees images, not motion, and there's no audio. The browser has to be able to play the file: MP4 and WebM work everywhere, while iPhone HEVC videos work in Safari.
 - Up to 16 images per message, counting each video frame.
-- Images use context: each one costs roughly 500–1,500 tokens, and earlier images are sent again with every message in the same chat.
+- Images use context: on Qwen3.8 27B, one token per 32×32 pixels, so a 1280×800 image is about 1,000 tokens and a video frame about 350. Earlier images are sent again with every message in the same chat.
 - The chat history saved in your browser keeps only small thumbnails. After reloading the page, the model is told an earlier image existed but can't see it anymore.
+
+## Context and compaction
+
+The context meter under the message box shows how much of the model's context the chat uses (for example `12.3k / 55.3k`). It turns orange near the compaction point and red near the limit. A `~` means it's an estimate.
+
+Compaction works like Claude Code's:
+
+- **Automatic:** when a chat passes 70% of the context (`compactAt` in `config.json`), the bridge has the model write a structured summary of the older messages. The summary covers goal and requests, key facts and decisions, files and code, problems and fixes, current state, next steps and progress. It replaces those messages. The newest few messages are kept word for word. Thinking is switched off for the summary so it fits in the room that's left. Very long chats are summarized in parts.
+- **Manual:** the **Compact** button summarizes the whole chat now, like `/compact`, with an optional "focus on…" note.
+- **What happens to the chat:** compacted messages stay visible but faded, and are no longer sent. A "Context compacted" marker shows the summary, which you can expand.
+- **CLAUDE.md:** CLAUDE.md files are re-read on every message, so compaction never loses them. In a project, each compaction also writes the summary's **Progress** section into that project's CLAUDE.md, so even a brand-new chat starts from it. A backup is kept, and you can untick this in the Compact dialog.
+
+Measured on the RTX 5070 Ti: a ~40k-token chat compacted to about 2k tokens in roughly 45 seconds, and the model still answered detailed questions about it correctly.
+
+Compaction keeps a long chat going, but it can't help a single message that's too big. Pasting a 48k-token document into a 55k context leaves almost no room. Put big documents in the project folder instead; the model searches them and reads only the parts it needs.
+
+Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.6` compacts earlier.
 
 ## Model loading
 
