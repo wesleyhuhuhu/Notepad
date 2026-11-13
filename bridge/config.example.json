@@ -1,0 +1,13 @@
+{
+  "port": 8787,
+  "host": "127.0.0.1",
+  "lmStudioUrl": "http://127.0.0.1:1234",
+  "model": "",
+  "claudeMdPath": "../CLAUDE.md",
+  "allowedOrigins": ["*"],
+  "allowModelEdits": true,
+  "maxToolRounds": 6,
+  "maxBackups": 50,
+  "siteUrl": "",
+  "accessToken": ""
+}

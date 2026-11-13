@@ -1,0 +1,6 @@
+# Secrets and local state stay on the PC
+bridge/config.json
+bridge/backups/
+CLAUDE.md
+*.tmp
+node_modules/
