@@ -80,24 +80,38 @@ if ($context) { $ctx = $context }
 if (-not $ctx) { $ctx = 32768; Write-Host "Couldn't read the model's context size; assuming $ctx." -ForegroundColor Yellow }
 
 # --- point this Claude Code session at the bridge ---
-$env:ANTHROPIC_BASE_URL = $bridge
-$env:ANTHROPIC_AUTH_TOKEN = $cfg.token
-Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
-foreach ($v in 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
-               'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL') {
-  Set-Item "Env:$v" $model
-}
-# The model's real context window, so auto-compact happens before it overflows.
-$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$ctx"
-# Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
-# reply cap leaves more room for work: 8192 -> compacts at about ctx - 21k (34k of 55k).
-$env:CLAUDE_CODE_MAX_OUTPUT_TOKENS = "$maxOutput"
-if ($ctx - $maxOutput - 13000 -lt 10000) {
-  Write-Host ("A {0:N0}-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." -f $ctx) -ForegroundColor Yellow
-}
-$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+# When typed in a PowerShell window, this script runs inside that window, so every setting
+# below is put back afterwards: a plain `claude` in the same window stays on your normal account.
+$modelVars = 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+             'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL'
+$touched = @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+             'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') + $modelVars
+$saved = @{}
+foreach ($n in $touched) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
 
-$toolArgs = if ($allTools) { @() } else { @('--tools', $coreTools) }
-Write-Host ("Claude Code -> {0} ({1:N0}-token context{2})" -f $model, $ctx, $(if ($allTools) { ', all tools' } else { ', core tools' })) -ForegroundColor Cyan
-& claude @toolArgs @pass
-exit $LASTEXITCODE
+$exitCode = 0
+try {
+  $env:ANTHROPIC_BASE_URL = $bridge
+  $env:ANTHROPIC_AUTH_TOKEN = $cfg.token
+  Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+  foreach ($v in $modelVars) { Set-Item "Env:$v" $model }
+  # The model's real context window, so auto-compact happens before it overflows.
+  $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$ctx"
+  # Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
+  # reply cap leaves more room for work: 8192 -> compacts at about ctx - 21k (34k of 55k).
+  $env:CLAUDE_CODE_MAX_OUTPUT_TOKENS = "$maxOutput"
+  if ($ctx - $maxOutput - 13000 -lt 10000) {
+    Write-Host ("A {0:N0}-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." -f $ctx) -ForegroundColor Yellow
+  }
+  $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+
+  $toolArgs = if ($allTools) { @() } else { @('--tools', $coreTools) }
+  Write-Host ("Claude Code -> {0} ({1:N0}-token context{2})" -f $model, $ctx, $(if ($allTools) { ', all tools' } else { ', core tools' })) -ForegroundColor Cyan
+  # Claude Code prints harmless notices (e.g. unrecognized_model) on stderr; don't let them stop the script.
+  $ErrorActionPreference = 'Continue'
+  & claude @toolArgs @pass
+  $exitCode = $LASTEXITCODE
+} finally {
+  foreach ($n in $touched) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
+}
+exit $exitCode
