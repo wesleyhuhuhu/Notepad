@@ -226,8 +226,15 @@ aside#mdpanel.open { display: flex; }
 .perm .row { justify-content: flex-start; }
 .perm.done { border-style: dashed; border-color: var(--border); color: var(--muted); padding: 5px 12px; font-size: 13px; }
 .turnfoot { font-size: 12px; color: var(--muted); margin-top: 6px; }
-body.code-mode .composer .meta, body.code-mode #attach { display: none; }
-#btnSide { display: none; padding: 5px 9px; }
+/* Claude Code sessions: only the context meter stays in the row under the message box. */
+body.code-mode .composer .meta > :not(#ctxMeter) { display: none; }
+#btnSide { display: none; font-size: 21px; line-height: 1; padding: 6px 12px; min-width: 44px; min-height: 38px; }
+.thumb .file {
+  width: 88px; height: 88px; border-radius: 8px; background: var(--chip); border: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-size: 11px; color: var(--muted); padding: 6px; text-align: center; overflow: hidden; overflow-wrap: anywhere;
+}
+.thumb .file b { font-size: 22px; line-height: 1; }
 #sideShade { display: none; }
 @keyframes pulse { 50% { opacity: .3; } }
 @media (max-width: 860px) {
@@ -256,11 +263,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 .row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
 .row .grow { flex: 1; font-size: 13px; }
 @media (max-width: 600px) {
+  /* Row 1: menu button + project/folder. Row 2: status + buttons. */
   header { flex-wrap: wrap; row-gap: 8px; }
   header h1 { display: none; }
-  #project, .where { flex: 1 1 100%; max-width: none; }
-  .status { order: 2; flex: 1 1 0; }
-  header .actions { order: 3; }
+  #btnSide { order: 0; }
+  #project, .where { order: 1; flex: 1 1 0; max-width: none; min-height: 38px; }
+  header::after { content: ""; order: 2; flex-basis: 100%; height: 0; }
+  .status { order: 3; flex: 1 1 0; }
+  header .actions { order: 4; }
   header .actions button { padding: 6px 9px; }
 }
 </style>
@@ -1143,7 +1153,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       const b = div('bubble');
       if (m.attachments && m.attachments.length) {
         const t = div('thumbs');
-        for (const a of m.attachments) t.appendChild(thumbEl(a.thumb, a.name, a.kind === 'video' ? `▶ ${a.frames} frames` : ''));
+        for (const a of m.attachments) t.appendChild(a.kind === 'file' ? fileEl(a.name, '') : thumbEl(a.thumb, a.name, a.kind === 'video' ? `▶ ${a.frames} frames` : ''));
         b.appendChild(t);
       }
       if (m.content) b.appendChild(document.createTextNode(m.content));
@@ -1151,6 +1161,20 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     } else if (m.blocks) renderCodeTurn(el, m, streaming);
     else renderAssistant(el, m, streaming);
     return el;
+  }
+
+  function fileEl(name, badge) {
+    const w = div('thumb');
+    const box = div('file');
+    const icon = document.createElement('b');
+    icon.textContent = '📄';
+    const label = document.createElement('span');
+    label.textContent = name;
+    box.append(icon, label);
+    box.title = name;
+    w.appendChild(box);
+    if (badge) { const b = div('badge'); b.textContent = badge; w.appendChild(b); }
+    return w;
   }
 
   function thumbEl(src, name, badge) {
@@ -1227,6 +1251,11 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     return live.length || summary ? Math.round(chars / 4 + images * 1000 + 1500) : 0;
   }
   function meterInfo() {
+    if (isCode()) {
+      // What Claude Code's last model call used (its prompt plus what it wrote).
+      for (let i = messages.length - 1; i >= 0; i--) if (messages[i].ctx) return { used: messages[i].ctx.used, ctx: messages[i].ctx.context, code: true };
+      return { used: 0, ctx: null, code: true };
+    }
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m.archived) continue;
@@ -1245,7 +1274,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     $('btnCompact').disabled = running() || !chat || !live;
     if (!ctx) return;
     const pct = Math.min(1, (info.used || 0) / ctx);
-    const at = (status && status.compactAt) || 0.7;
+    // Claude Code compacts on its own about 21k tokens before the end (see claude-local).
+    const at = info.code ? Math.max(0.5, (ctx - 21000) / ctx) : (status && status.compactAt) || 0.7;
     el.className = 'ctx' + (pct >= 0.9 ? ' full' : pct >= at - 0.05 ? ' warn' : '');
     $('ctxFill').style.width = (pct * 100).toFixed(1) + '%';
     $('ctxText').textContent = `${info.approx ? '~' : ''}${kTok(info.used || 0)} / ${kTok(ctx)}`;
@@ -1253,7 +1283,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       `Context: about ${Math.round(info.used || 0).toLocaleString()} of ${ctx.toLocaleString()} tokens in use` +
       (info.tools && info.peak > info.used + 1000 ? ` (up to ${info.peak.toLocaleString()} during the last reply, while it used tools)` : '') +
       '.' +
-      (status && status.autoCompact ? ` Older messages are compacted automatically past ${Math.round(at * 100)}%.` : '');
+      (info.code
+        ? ` Claude Code compacts the session by itself at about ${kTok(ctx - 21000)}.`
+        : status && status.autoCompact ? ` Older messages are compacted automatically past ${Math.round(at * 100)}%.` : '');
   }
 
   // Reads the bridge's event stream, calling onEvent for each event. Errors thrown by onEvent stop it.
@@ -1404,13 +1436,38 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
   }
 
-  const imageCount = () => pending.reduce((n, p) => n + (p.images ? p.images.length : p.kind === 'video' ? MAX_FRAMES : 1), 0);
+  const imageCount = () => pending.reduce((n, p) => n + (p.kind === 'file' ? 0 : p.images ? p.images.length : p.kind === 'video' ? MAX_FRAMES : 1), 0);
+  const MAX_FILE = 10 * 1024 * 1024; // per file, for Claude Code sessions
+
+  // Any other file (code, text, PDF…): sent as-is and saved in the session's folder.
+  function readFileData(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).replace(/^data:[^,]*,/, ''));
+      r.onerror = () => reject(new Error('Could not read this file.'));
+      r.readAsDataURL(file);
+    });
+  }
 
   async function addFiles(files) {
     for (const f of files) {
       const isVideo = /^video\//.test(f.type);
       const isImage = /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name || '');
-      if (!isVideo && !isImage) continue;
+      if (!isVideo && !isImage) {
+        if (!isCode()) continue;
+        if (f.size > MAX_FILE) { flashTray(`"${f.name}" is too big (up to 10 MB per file).`); continue; }
+        const item = { kind: 'file', name: f.name || 'file', size: f.size, loading: true };
+        pending.push(item);
+        renderTray();
+        try {
+          item.data = await readFileData(f);
+        } catch (e) {
+          item.error = e.message;
+        }
+        item.loading = false;
+        renderTray();
+        continue;
+      }
       if (imageCount() >= MAX_IMAGES) { flashTray(`Up to ${MAX_IMAGES} images per message (a video counts as up to ${MAX_FRAMES}).`); break; }
       const item = { kind: isVideo ? 'video' : 'image', name: f.name || (isVideo ? 'video' : 'pasted image'), loading: true };
       pending.push(item);
@@ -1438,7 +1495,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     tray.textContent = '';
     for (const p of pending) {
       const badge = p.loading ? 'Reading…' : p.error ? 'Error' : p.kind === 'video' ? `▶ ${p.images.length} frames` : '';
-      const t = thumbEl(p.thumb, p.error || p.name, badge);
+      const t = p.kind === 'file' ? fileEl(p.name, badge) : thumbEl(p.thumb, p.error || p.name, badge);
       if (p.error) t.classList.add('bad');
       const rm = document.createElement('button');
       rm.className = 'rm';
@@ -1466,6 +1523,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     return !m || m.vision !== false;
   }
   function updateAttach() {
+    if (isCode()) {
+      // Sessions take any file; images go to the model if it can see them.
+      $('attach').disabled = false;
+      $('attach').title = 'Attach files or images (files are saved in the session folder)';
+      $('fileInput').accept = '';
+      return;
+    }
+    $('fileInput').accept = 'image/*,video/*';
     const ok = visionAvailable();
     $('attach').disabled = !ok;
     $('attach').title = ok ? 'Attach images or a video' : "The selected model can't see images";
@@ -1493,7 +1558,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const fromInput = typeof textOverride !== 'string';
     const text = (fromInput ? $('input').value : textOverride).trim();
     if (fromInput && pending.some((p) => p.loading)) { flashTray('Still reading attachments…'); return; }
-    const atts = fromInput && !isCode() ? pending.filter((p) => !p.error && p.images && p.images.length) : [];
+    const atts = fromInput ? pending.filter((p) => !p.error && ((p.images && p.images.length) || (isCode() && p.kind === 'file' && p.data))) : [];
     if (!text && !atts.length) return;
     if (!settings.bridgeUrl || !settings.token) { openSettings(); return; }
 
@@ -1510,7 +1575,13 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       }
       if (isCode()) {
         if (!messages.length) $('list').querySelector('.empty')?.remove();
-        await apiJson(`/api/chats/${chat.id}/messages`, { method: 'POST', body: JSON.stringify({ content: text }) });
+        await apiJson(`/api/chats/${chat.id}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            content: text,
+            attachments: atts.map((a) => (a.kind === 'file' ? { kind: 'file', name: a.name, data: a.data } : { kind: a.kind, name: a.name, thumb: a.thumb, note: a.note, images: a.images })),
+          }),
+        });
         askToNotify();
         return;
       }
@@ -1552,6 +1623,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       $('where').title = chat.cwd;
     }
     updateMdControls();
+    updateAttach();
+    updateMeter();
     if ($('mdpanel').classList.contains('open')) loadMd();
   }
 
@@ -1622,6 +1695,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         break;
       }
       case 'result': m.result = ev.result; m.notice = ''; m.gen = null; break;
+      case 'ctx_usage': m.ctx = ev.ctx; updateMeter(); break;
       case 'gen': m.gen = ev; break;
       case 'status': m.notice = ev.text; break;
       case 'error': if (ev.message) m.error = ev.message; break;
@@ -2000,6 +2074,34 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('newProject').addEventListener('close', () => { npForCode = false; });
   $('cdGo').addEventListener('click', startCodeSession);
   $('sideShade').addEventListener('click', closeSide);
+  // Phones: swipe right to open the chat list, swipe left on it to close it.
+  {
+    let sx = 0, sy = 0, st = 0, tracking = false;
+    const narrow = () => matchMedia('(max-width: 860px)').matches;
+    const inScroller = (el) => {
+      for (; el && el !== document.body; el = el.parentElement) {
+        if (el.scrollWidth > el.clientWidth + 2 && /auto|scroll/.test(getComputedStyle(el).overflowX)) return true;
+      }
+      return false;
+    };
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || !narrow() || document.querySelector('dialog[open]')) { tracking = false; return; }
+      const t = e.touches[0];
+      // Leave sideways-scrolling things (code blocks, tables) and text boxes alone.
+      tracking = !inScroller(e.target) && !e.target.closest('textarea, input, select');
+      sx = t.clientX; sy = t.clientY; st = Date.now();
+    }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6 || Date.now() - st > 800) return;
+      const open = $('side').classList.contains('open');
+      if (dx > 0 && !open) openSide();
+      else if (dx < 0 && open) closeSide();
+    }, { passive: true });
+  }
   $('project').addEventListener('change', () => {
     const v = $('project').value;
     if (v === NEW_PROJECT) {

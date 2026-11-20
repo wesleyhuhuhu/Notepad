@@ -94,7 +94,7 @@ Settings in `config.json`: `"autoCompact": false` turns automatic compaction off
 ## Chats live on your PC
 
 Chats are stored by the bridge in `bridge/chats/`, not in the browser. The website is a window onto them.
-- **Same chats everywhere:** the list on the left (a ☰ drawer on phones) is the same on every device. Each chat has its own link (`…/#chat=<id>`), so a chat opened on your laptop can be continued on your phone.
+- **Same chats everywhere:** the list on the left (on phones, a drawer: tap ☰ or swipe right; swipe left to close it) is the same on every device. Each chat has its own link (`…/#chat=<id>`), so a chat opened on your laptop can be continued on your phone.
 - **Replies run on the PC:** closing the tab, locking the phone or losing signal doesn't stop a reply. Open the chat again and it catches up, then keeps streaming. Two devices can watch the same reply live.
 - **Several chats per project:** **New chat** starts another one in the selected project. Picking a project shows its chats; open, rename or delete them from the list. Deleting moves the chat to `bridge/chats/.trash/`.
 - **One reply at a time:** the model runs one reply at a time. A message sent while another chat is replying waits ("Waiting for the model…") and starts after it.
@@ -145,7 +145,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 - **Cost:** Exa's free balance is $10 a month. With the defaults (`"webSearchType": "auto"`, 8 results, 1,500-character excerpts) a search costs about $0.007, so roughly 1,400 searches a month; `"lite"` costs about $0.004. The bridge window logs each search with its cost.
 - **Other services:** `"webSearchProvider"` picks the service. `exa` is the only one so far; others can be added to `searchProviders` in `bridge/server.js`.
 
-**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 21k with the launcher's 8,192 reply cap. With the current 96k context that's about **75k**. Measured earlier with a 55.3k context:
+**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 21k with the launcher's 8,192 reply cap. With the default 96k context that's about **75k** (about 69k when loaded at 90k). Measured earlier with a 55.3k context:
 
 | Reply cap | Free for work | Compacts at about |
 |---|---|---|
@@ -180,6 +180,8 @@ The **Claude Code** button starts a Claude Code session on one of your computers
   - **Allow file changes; ask before commands.**
   - **Allow file changes and commands (no approvals):** it works on its own. Use it in folders you don't mind it changing.
   - In every mode, web searches and page reads never ask, reading files never asks, and anything outside the session's folder still asks.
+- **Attachments:** the paperclip (or paste or drag) takes images, videos and any other file, up to 10 MB each and 25 MB per message. Images and video frames go to the model directly. Other files are saved in the session's folder under `uploads/` (never overwriting) and Claude Code is told where they are.
+- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 21k tokens before the end.
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.
@@ -213,8 +215,9 @@ Set the context length there to something that fits. Measured on the RTX 5070 Ti
 | Context | GPU memory used in total | Generation speed |
 |---|---|---|
 | 64k (64,000) | 14.7 GB | ~53.5 tokens/s |
-| 90k (90,000) | 15.4 GB | ~54 tokens/s, even with a browser and other apps open |
-| **96k (96,000, the saved default)** | 15.4 GB | ~54.5 tokens/s with GPU-heavy apps closed; 31 with Firefox open |
+| 90k (90,000) | 15.4 GB | ~54 tokens/s, even with a browser and other apps open. Load it like this when 96k is slow: `lms load qwen3.8-27b-heretic-gsq-rco -y --context-length 90000` |
+| 92k (92,000) | 15.5 GB | ~34 tokens/s with the Claude app and a browser open; full speed with fewer apps open |
+| **96k (96,000, the saved default)** | 15.4 GB | ~54.5 tokens/s with GPU-heavy apps closed; 18–31 with apps open |
 | 98k (98,304) | 15.5 GB | ~34 tokens/s |
 | 100k (100,000) | 15.6 GB | ~16 tokens/s, even with everything else closed |
 | 112k and up | | fails to load |
@@ -223,7 +226,7 @@ Measured on 2026-11-20 with only ~0.6 GB in use before loading. An earlier measu
 
 For comparison, the previous model (`…@iq3_m`, q8_0 cache) slowed from ~45 to ~4 tokens/s above 55k because part of it ended up in system RAM.
 
-**96k leaves almost no spare GPU memory.** Everything else on screen shares the card's 16 GB: Windows itself, both monitors, and every open app that draws with the GPU, such as Firefox, Edge, the Claude app and LM Studio's window. When those take a few hundred MB more, part of the model moves into system RAM and speed falls from ~54 to anywhere between 1 and 30 tokens/s. Claude Code then times out and resends its requests, so a task that should take a minute takes half an hour.
+**92k–96k leave almost no spare GPU memory.** Everything else on screen shares the card's 16 GB: Windows itself, both monitors, and every open app that draws with the GPU, such as Firefox, Edge, the Claude app and LM Studio's window. When those take a few hundred MB more, part of the model moves into system RAM and speed falls from ~54 to anywhere between 1 and 34 tokens/s. The stats under each reply show it (tok/s). Claude Code then times out and resends its requests, so a task that should take a minute takes half an hour.
 
 **If it's slow:** close GPU-heavy apps, or turn off hardware acceleration in the browser, then reload the model:
 ```
@@ -281,7 +284,7 @@ To stop public access entirely: `tailscale funnel --https=443 off`.
 ## Model and performance notes
 
 - **Current model:** `qwen3.8-27b-heretic-gsq-rco`, the same uncensored RVN model as before but compressed with the GSQ-RCO method. It's 11.8 GB plus the 0.63 GB vision file (12.42 GB in all, 0.79 GB less than the old IQ3_M). Its publisher measured it within 0.95% of full weights (wikitext-2 perplexity), against +2.9% for a standard IQ3_S. It's from [0bserverx/Qwen3.8-27B-Heretic-GSQ-RCO-GGUF](https://huggingface.co/0bserverx/Qwen3.8-27B-Heretic-GSQ-RCO-GGUF); the vision file is linked from the original RVN folder.
-- **Speed and context:** with keys at q8_0 and values at q4_0, it runs at ~54 tokens/s with a 96k context. It thinks before answering; open **Reasoning** to see it.
+- **Speed and context:** with keys at q8_0 and values at q4_0, it runs at ~54 tokens/s with a 90k context, less at 92k–96k when other apps use the GPU. It thinks before answering; open **Reasoning** to see it.
 - **Long-context check:** with an 87.6k-token document, it found three facts hidden at 10%, 50% and 90% depth. Reading the document took ~87 s before the first word, and replies ran at ~26 tokens/s while the context was that full.
 - **Old files:** the previous `@iq3_m` and `@iq4_xs` files are still in LM Studio. The IQ4_XS won't fit on the GPU with any useful context.
 - **CLAUDE.md generation:** takes about a minute for a small project. The model reads the key files, not a whole large codebase.

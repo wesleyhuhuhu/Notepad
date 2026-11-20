@@ -69,19 +69,61 @@ module.exports = function createHosts(d) {
     }
   }
 
+  const IMAGE_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+=*$/;
+  const MAX_IMAGES = 16;
+  const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+  // Images (and video frames) go to the model; other files are saved in the session folder.
+  function attachments(list) {
+    const images = [];
+    const files = [];
+    const notes = [];
+    const shown = [];
+    let bytes = 0;
+    for (const a of Array.isArray(list) ? list : []) {
+      if (!a || typeof a !== 'object') continue;
+      const name = String(a.name || 'file').slice(0, 200);
+      if (a.kind === 'file') {
+        const data = typeof a.data === 'string' ? a.data : '';
+        bytes += Math.floor((data.length * 3) / 4);
+        if (!data || bytes > MAX_FILE_BYTES) throw httpError(413, 'Attached files can be up to 25 MB in total.');
+        files.push({ name, data });
+        shown.push({ kind: 'file', name, size: Math.floor((data.length * 3) / 4) });
+        continue;
+      }
+      const urls = (Array.isArray(a.images) ? a.images : []).filter((u) => typeof u === 'string' && IMAGE_RE.test(u));
+      if (!urls.length) continue;
+      if (images.length + urls.length > MAX_IMAGES) throw httpError(400, `Up to ${MAX_IMAGES} images per message (a video counts as several).`);
+      images.push(...urls);
+      if (typeof a.note === 'string' && a.note) notes.push(a.note.slice(0, 2000));
+      shown.push({
+        kind: a.kind === 'video' ? 'video' : 'image',
+        name,
+        thumb: typeof a.thumb === 'string' && IMAGE_RE.test(a.thumb) && a.thumb.length < 200000 ? a.thumb : '',
+        frames: urls.length,
+      });
+    }
+    return { images, files, notes, shown };
+  }
+
   async function message(chat, body) {
     if (chat.run) throw httpError(409, 'Claude Code is still working in this session. Stop it first, or wait.');
     const text = typeof body.content === 'string' ? body.content.trim().slice(0, 100000) : '';
-    if (!text) throw httpError(400, 'The message is empty.');
+    const att = attachments(body.attachments);
+    if (!text && !att.shown.length) throw httpError(400, 'The message is empty.');
     command(chat.host, {
       type: 'message',
       chatId: chat.id,
       content: text,
+      images: att.images,
+      files: att.files,
+      notes: att.notes,
       cwd: chat.cwd,
       permissionMode: chat.permissionMode,
       resume: chat.sdkSessionId || undefined,
     });
     const user = { id: chats.newId(), role: 'user', content: text, at: Date.now() };
+    if (att.shown.length) user.attachments = att.shown;
     const turn = { id: chats.newId(), role: 'assistant', blocks: [], at: Date.now() };
     chat.messages.push(user, turn);
     chat.updatedAt = Date.now();
@@ -189,6 +231,10 @@ module.exports = function createHosts(d) {
         chats.listChanged(chat);
         return;
       }
+      case 'ctx_usage':
+        turn.ctx = { used: Number(ev.used) || 0, context: Number(ev.context) || null };
+        out.ctx = turn.ctx;
+        break;
       case 'gen':
         chats.live(chat, { type: 'gen', id: turn.id, phase: ev.phase, tokens: ev.tokens, thinking: ev.thinking, tps: ev.tps, waited: ev.waited });
         return;

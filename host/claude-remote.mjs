@@ -185,7 +185,7 @@ async function startSession(chatId, cmd) {
     CLAUDE_AGENT_SDK_CLIENT_APP: 'local-llm-claude-remote/1.0',
   };
 
-  const s = { chatId, cwd, inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set() };
+  const s = { chatId, cwd, ctx, inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set() };
   async function* input() {
     while (!s.closed) {
       while (s.inbox.length) yield s.inbox.shift();
@@ -193,8 +193,8 @@ async function startSession(chatId, cmd) {
       s.wake = null;
     }
   }
-  s.push = (text) => {
-    s.inbox.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+  s.push = (content) => {
+    s.inbox.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
     if (s.wake) s.wake();
   };
 
@@ -300,7 +300,14 @@ async function pump(s) {
         break;
       case 'stream_event': {
         const e = m.event;
-        if (e.type === 'message_start' && e.message && e.message.id) s.current = e.message.id;
+        if (e.type === 'message_start' && e.message && e.message.id) {
+          s.current = e.message.id;
+          const u = e.message.usage || {};
+          s.promptTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+          if (s.promptTokens) send(id, { type: 'ctx_usage', used: s.promptTokens, context: s.ctx });
+        } else if (e.type === 'message_delta' && e.usage && s.promptTokens) {
+          send(id, { type: 'ctx_usage', used: s.promptTokens + (e.usage.output_tokens || 0), context: s.ctx });
+        }
         else if (e.type === 'content_block_start' && e.content_block && (e.content_block.type === 'text' || e.content_block.type === 'thinking')) {
           s.deltas.add(s.current);
           send(id, { type: 'block_start', kind: e.content_block.type });
@@ -362,6 +369,34 @@ async function pump(s) {
   }
 }
 
+// Attached files are saved in <session folder>/uploads/ (never overwriting); images are shown
+// to the model directly. Returns the message content for the SDK.
+function saveUpload(cwd, f) {
+  const dir = path.join(cwd, 'uploads');
+  fs.mkdirSync(dir, { recursive: true });
+  const clean = String(f.name || 'file').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 120) || 'file';
+  const ext = path.extname(clean);
+  const stem = clean.slice(0, clean.length - ext.length);
+  let name = clean;
+  for (let i = 1; fs.existsSync(path.join(dir, name)); i++) name = `${stem} (${i})${ext}`;
+  fs.writeFileSync(path.join(dir, name), Buffer.from(String(f.data || ''), 'base64'));
+  return 'uploads/' + name;
+}
+
+function messageContent(s, cmd) {
+  let text = String(cmd.content || '');
+  const saved = (cmd.files || []).map((f) => saveUpload(s.cwd, f));
+  const notes = (cmd.notes || []).filter(Boolean);
+  if (notes.length) text = [text, ...notes].filter(Boolean).join('\n\n');
+  if (saved.length) text = [text, saved.map((p) => `[Attached file, saved in this folder as ${p}]`).join('\n')].filter(Boolean).join('\n\n');
+  const images = (cmd.images || [])
+    .map((url) => /^data:(image\/[a-z+]+);base64,(.+)$/.exec(String(url)))
+    .filter(Boolean)
+    .map((m) => ({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } }));
+  if (!images.length) return text || '(see attached)';
+  return [...images, { type: 'text', text: text || (images.length > 1 ? 'Here are some images.' : 'Here is an image.') }];
+}
+
 async function handleCommand(cmd) {
   const id = cmd.chatId;
   try {
@@ -369,7 +404,7 @@ async function handleCommand(cmd) {
       case 'message': {
         let s = sessions.get(id);
         if (!s) s = await startSession(id, cmd);
-        s.push(String(cmd.content || ''));
+        s.push(messageContent(s, cmd));
         break;
       }
       case 'permission': {

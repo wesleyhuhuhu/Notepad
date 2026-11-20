@@ -584,7 +584,7 @@ module.exports = function createChats(d) {
         return true;
       case 'POST messages':
         // Larger limit: messages can carry images.
-        if (chat.kind === 'code') json(res, 202, await code.message(chat, await readJson(req)));
+        if (chat.kind === 'code') json(res, 202, await code.message(chat, await readJson(req, 48 * 1024 * 1024)));
         else json(res, 202, await addMessage(chat, await readJson(req, 64 * 1024 * 1024)));
         return true;
       case 'POST stop':
