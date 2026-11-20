@@ -79,20 +79,25 @@ function findClaude() {
 }
 const CLAUDE = findClaude();
 
+// Changes every time this program starts, so the bridge can tell a restart from a re-register.
+const BOOT_ID = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const log = (msg) => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const H = { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
 
-// Folders the website may pick: each root and the folders directly inside it.
+// Folders the website may pick: each root and the folders directly inside it (not build or
+// cache folders). The list is sent again whenever a root's contents change.
+const SKIP_DIRS = new Set(['node_modules', '__pycache__', 'venv', 'env', 'dist', 'build', 'out', 'bin', 'obj', 'target', 'coverage']);
 function folderList() {
   const out = [];
   for (const root of ROOTS) {
     out.push(root);
     try {
-      for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-        if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') out.push(path.join(root, e.name));
-        if (out.length > 300) break;
-      }
+      const dirs = fs.readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$') && !SKIP_DIRS.has(e.name.toLowerCase()))
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      for (const name of dirs.slice(0, 300)) out.push(path.join(root, name));
     } catch {}
   }
   return out;
@@ -335,6 +340,8 @@ async function handleCommand(cmd) {
 
 // ------------------------------------------------- connection to bridge --
 async function register() {
+  const folders = folderList();
+  lastFolders = JSON.stringify(folders);
   const r = await fetch(`${BRIDGE}/api/hosts/${HOST_ID}/register`, {
     method: 'POST',
     headers: H,
@@ -343,8 +350,9 @@ async function register() {
       os: `${os.type()} ${os.release()}`,
       platform: process.platform,
       roots: ROOTS,
-      folders: folderList(),
+      folders,
       sessions: [...sessions.keys()],
+      bootId: BOOT_ID,
       claude: !!CLAUDE,
       managed: opt.managed,
     }),
@@ -391,6 +399,27 @@ if (opt.managed) {
     }
   }, 3000).unref();
 }
+
+// Re-register when folders are added, removed or renamed in a root, so the website's list is current.
+let lastFolders = '';
+let refreshTimer = null;
+function refreshFolders() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    const now = JSON.stringify(folderList());
+    if (now === lastFolders) return;
+    try {
+      await register();
+      log('Folder list updated.');
+    } catch {}
+  }, 1500);
+}
+for (const root of ROOTS) {
+  try {
+    fs.watch(root, { persistent: false }, refreshFolders);
+  } catch {}
+}
+setInterval(refreshFolders, 60000).unref();
 
 async function main() {
   if (!CLAUDE) log('Warning: the `claude` command was not found. Install Claude Code, or set CLAUDE_CODE_PATH.');

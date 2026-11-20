@@ -21,6 +21,8 @@ const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const net = require('net');
 
 // ---------------------------------------------------------------- config ---
 
@@ -54,6 +56,8 @@ const DEFAULTS = {
   webSearchType: 'auto', // Exa: 'auto' (best results, $7/1k) or 'lite' (cheaper, $4/1k)
   webSearchResults: 8, // results per search (Exa's base price covers up to 10)
   webSearchChars: 1500, // excerpt length per result
+  // Plain chats on the website can search the web (needs the key above) and read web pages.
+  allowWebTools: true,
   accessToken: '',
 };
 
@@ -377,7 +381,7 @@ function fn(name, description, properties = {}, required = []) {
   return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } };
 }
 
-function buildTools({ project, allowEdits, allowCode }) {
+function buildTools({ project, allowEdits, allowCode, allowWeb }) {
   const scope = project
     ? {
         scope: {
@@ -440,6 +444,32 @@ function buildTools({ project, allowEdits, allowCode }) {
       )
     );
   }
+  if (allowWeb) {
+    if (webSearchReady())
+      tools.push(
+        fn(
+          'web_search',
+          'Search the web. Returns the top results with their addresses and an excerpt from each page. Use it for anything recent, ' +
+            "or anything you're not sure about, then read the most useful pages with web_fetch.",
+          {
+            query: { type: 'string', description: 'What to search for.' },
+            site: { type: 'string', description: 'Optional: only search this website, e.g. "nodejs.org".' },
+          },
+          ['query']
+        )
+      );
+    tools.push(
+      fn(
+        'web_fetch',
+        'Read a web page as plain text. Long pages come in parts of about 12,000 characters: call again with start to read further.',
+        {
+          url: { type: 'string', description: 'The page address (http or https).' },
+          start: { type: 'integer', description: 'Character to start from. Default 0.' },
+        },
+        ['url']
+      )
+    );
+  }
   return tools;
 }
 
@@ -483,6 +513,17 @@ async function runTool(name, args, ctx) {
       return { ok: true, result: await readProjectFile(ctx.projectDir, args.path, args.start_line, args.end_line) };
     case 'search_project':
       return { ok: true, result: await searchProject(ctx.projectDir, args.query, args.path, args.regex === true, args.max_results) };
+    case 'web_search': {
+      const query = String(args.query || '').trim().slice(0, 500);
+      if (!query) return { ok: false, result: 'Error: query is required.' };
+      const site = typeof args.site === 'string' && args.site.trim() ? [args.site.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')] : [];
+      const t0 = Date.now();
+      const { results, cost } = await searchProviders[cfg.webSearchProvider]({ query, allowed: site, blocked: [], signal: AbortSignal.timeout(45000) });
+      log(`Chat web search (${cfg.webSearchProvider}): "${query.slice(0, 80)}" -> ${results.length} results in ${((Date.now() - t0) / 1000).toFixed(1)}s${cost != null ? `, $${Number(cost).toFixed(4)}` : ''}`);
+      return { ok: true, result: formatSearchResults(query, results, 'web_fetch') };
+    }
+    case 'web_fetch':
+      return { ok: true, result: await fetchPage(args.url, args.start) };
     default:
       return { ok: false, result: `Error: unknown tool "${name}".` };
   }
@@ -497,9 +538,10 @@ function inline(md, max, missing) {
   return md;
 }
 
-function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra, summary }) {
+function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, allowWeb, extra, summary }) {
   const L = [
     "You are a helpful assistant running locally on the user's own computer through LM Studio.",
+    `Today's date is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`,
     'You have memory files called CLAUDE.md. Follow the instructions in them.',
     '',
     'Global CLAUDE.md (applies to every chat):',
@@ -538,6 +580,12 @@ function buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdit
   } else {
     L.push('CLAUDE.md files are read-only in this chat. If asked to change one, explain that edits are turned off.');
   }
+  if (allowWeb)
+    L.push(
+      '',
+      (webSearchReady() ? 'You can search the web with web_search and read web pages with web_fetch. ' : 'You can read web pages with web_fetch. ') +
+        "Use them for current information or facts you're not sure of, instead of guessing. Mention the addresses you used."
+    );
   if (extra && typeof extra === 'string' && extra.trim()) L.push('', extra.trim());
   if (summary)
     L.push(
@@ -897,7 +945,8 @@ async function chatCore(body, send, signal) {
     projectTarget = await mdTarget(project);
   }
   const globalTarget = await mdTarget(null);
-  const tools = buildTools({ project, allowEdits, allowCode });
+  const allowWeb = cfg.allowWebTools !== false;
+  const tools = buildTools({ project, allowEdits, allowCode, allowWeb });
   const ctx = { project, projectDir, projectTarget, globalTarget };
   const ac = { signal };
 
@@ -913,7 +962,7 @@ async function chatCore(body, send, signal) {
     const globalMd = await readMd(globalTarget);
     const projectMd = projectTarget ? await readMd(projectTarget) : null;
     const systemFor = (summary) =>
-      buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, extra: body.system, summary });
+      buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, allowWeb, extra: body.system, summary });
 
     let summary = lastSummary(body.messages);
     let history = sanitizeHistory(body.messages);
@@ -1108,12 +1157,110 @@ const searchProviders = {
   },
 };
 
-function formatSearchResults(query, results) {
+function formatSearchResults(query, results, fetchTool = 'WebFetch') {
   if (!results.length) return `No web results found for "${query}".`;
   const parts = results.map((r, i) =>
     [`[${i + 1}] ${r.title}`, `URL: ${r.url}`, r.published ? `Published: ${r.published}` : '', r.text].filter(Boolean).join('\n')
   );
-  return `Web results for "${query}" (excerpts from each page; use WebFetch on a URL to read the whole page):\n\n${parts.join('\n\n')}`;
+  return `Web results for "${query}" (excerpts from each page; use ${fetchTool} on a URL to read the whole page):\n\n${parts.join('\n\n')}`;
+}
+
+const webSearchReady = () => !!(searchProviders[cfg.webSearchProvider] && (cfg.exaApiKey || process.env.EXA_API_KEY));
+
+// ------------------------------------------------------------ web pages ---
+// web_fetch for website chats. Only public addresses: pages on this PC, the home network or
+// the tailnet are refused, so a page can't trick the model into reaching local services.
+
+function privateAddress(ip) {
+  if (net.isIPv6(ip)) {
+    const v = ip.toLowerCase();
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v);
+    if (mapped) return privateAddress(mapped[1]);
+    return v === '::' || v === '::1' || /^f[cd]/.test(v) || /^fe[89ab]/.test(v) || /^ff/.test(v);
+  }
+  const [a, b] = ip.split('.').map(Number);
+  return (
+    a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) // carrier-grade NAT, which Tailscale uses
+  );
+}
+
+async function publicUrl(address) {
+  let url;
+  try {
+    url = new URL(String(address || '').trim());
+  } catch {
+    throw new Error('That is not a valid web address.');
+  }
+  if (!/^https?:$/.test(url.protocol)) throw new Error('Only http and https addresses can be read.');
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const addrs = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true }).catch(() => []);
+  if (!addrs.length) throw new Error(`Could not find the website "${host}".`);
+  if (addrs.some((x) => privateAddress(x.address))) throw new Error('Pages on this PC or the local network cannot be read.');
+  return url;
+}
+
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '—', ndash: '–', hellip: '…', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', copy: '©' };
+const decodeEntities = (t) =>
+  t.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m;
+    }
+    return ENTITIES[e.toLowerCase()] || m;
+  });
+
+function htmlToText(html) {
+  const title = decodeEntities(((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html) || [])[1] || '').replace(/\s+/g, ' ').trim());
+  let h = html;
+  const main = /<(main|article)\b[^>]*>([\s\S]*?)<\/\1>/i.exec(h);
+  if (main && main[2].length > 500) h = main[2];
+  h = h
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|svg|template|iframe|head|nav|footer|form)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(br|hr)\b[^>]*>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<h([1-6])\b[^>]*>/gi, (m, n) => '\n\n' + '#'.repeat(Number(n)) + ' ')
+    .replace(/<(td|th)\b[^>]*>/gi, ' | ')
+    .replace(/<\/(p|div|section|article|h[1-6]|tr|table|ul|ol|pre|blockquote|header|aside)>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '');
+  const text = decodeEntities(h).replace(/[ \t\f\v\r]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { title, text };
+}
+
+const PAGE_PART = 12000;
+async function fetchPage(address, start) {
+  let url = await publicUrl(address);
+  let r;
+  for (let hop = 0; ; hop++) {
+    r = await fetch(url, {
+      redirect: 'manual',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; local-llm-bridge)', Accept: 'text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5' },
+      signal: AbortSignal.timeout(20000),
+    });
+    const loc = r.status >= 300 && r.status < 400 && r.headers.get('location');
+    if (!loc) break;
+    if (hop >= 5) throw new Error('The page redirected too many times.');
+    url = await publicUrl(new URL(loc, url).href);
+  }
+  if (!r.ok) throw new Error(`The page answered with error ${r.status}.`);
+  const type = r.headers.get('content-type') || '';
+  if (type && !/text|json|xml|javascript/i.test(type)) throw new Error(`That address is not a text page (${type.split(';')[0]}).`);
+  const chunks = [];
+  let size = 0;
+  for await (const c of r.body) {
+    chunks.push(c);
+    size += c.length;
+    if (size > 3 * 1024 * 1024) break;
+  }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  const { title, text } = /html|xml/i.test(type) || /^\s*</.test(raw) ? htmlToText(raw) : { title: '', text: raw.trim() };
+  const from = Math.max(0, Math.min(Number(start) || 0, text.length));
+  const part = text.slice(from, from + PAGE_PART);
+  const more = from + PAGE_PART < text.length ? `\n\n[Characters ${from}–${from + part.length} of ${text.length}. Call web_fetch with start=${from + PAGE_PART} to read more.]` : '';
+  log(`Chat web_fetch: ${url.href.slice(0, 120)} (${text.length} chars)`);
+  return `${url.href}${title ? '\n' + title : ''}\n\n${part || '(The page has no readable text.)'}${more}`;
 }
 
 async function handleWebSearch(req, res, body, tool) {
@@ -1325,6 +1472,8 @@ function summarizeArgs(args) {
   if (Number.isInteger(args.start_line)) out.start_line = args.start_line;
   if (Number.isInteger(args.end_line)) out.end_line = args.end_line;
   if (typeof args.query === 'string') out.query = args.query.slice(0, 120);
+  if (typeof args.url === 'string') out.url = args.url.slice(0, 300);
+  if (typeof args.site === 'string') out.site = args.site.slice(0, 100);
   return out;
 }
 
@@ -1343,6 +1492,8 @@ async function handleStatus(res) {
     allowCodeReading: cfg.allowCodeReading,
     autoCompact: cfg.autoCompact,
     compactAt: cfg.compactAt,
+    webTools: cfg.allowWebTools !== false,
+    webSearch: webSearchReady(),
     projectsRoot: cfg.projectsRootAbs || null,
     globalClaudeMd: cfg.claudeMdAbs,
   });
@@ -1595,7 +1746,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages };
+module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages, fetchPage, privateAddress, htmlToText };
 
 if (require.main === module) chats.init().then(() => server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);

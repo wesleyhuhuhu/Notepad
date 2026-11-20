@@ -948,6 +948,11 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       case 'write_claude_md': return 'Wrote CLAUDE.md' + g;
       case 'list_project_files': return 'Listed ' + ((t.args && t.args.path) || 'project files');
       case 'search_project': return 'Searched for "' + ((t.args && t.args.query) || '') + '"' + (t.args && t.args.path ? ' in ' + t.args.path : '');
+      case 'web_search': return 'Searched the web for "' + ((t.args && t.args.query) || '') + '"' + (t.args && t.args.site ? ' on ' + t.args.site : '');
+      case 'web_fetch': {
+        const u = (t.args && t.args.url) || '';
+        try { const x = new URL(u); return 'Read ' + x.hostname + (x.pathname.length > 1 ? x.pathname.slice(0, 40) : ''); } catch { return 'Read a web page'; }
+      }
       case 'read_project_file': {
         const a = t.args || {};
         const range = a.start_line || a.end_line ? ` (lines ${a.start_line || 1}–${a.end_line || 'end'})` : '';

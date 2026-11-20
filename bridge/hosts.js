@@ -215,7 +215,9 @@ module.exports = function createHosts(d) {
       const b = await readJson(req);
       const strs = (a, n) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string').slice(0, n) : []);
       const h = hosts.get(id) || { id, send: null };
+      const restarted = h.bootId !== b.bootId;
       Object.assign(h, {
+        bootId: String(b.bootId || ''),
         name: String(b.name || id).slice(0, 60),
         os: String(b.os || '').slice(0, 80),
         platform: String(b.platform || ''),
@@ -226,10 +228,12 @@ module.exports = function createHosts(d) {
         lastSeen: Date.now(),
       });
       hosts.set(id, h);
-      // Sessions this host no longer has (it restarted): their running turns are over.
-      const alive = new Set(strs(b.sessions, 1000));
-      for (const chat of chats.chats.values())
-        if (chat.kind === 'code' && chat.host === id && chat.run && !alive.has(chat.id)) endTurn(chat, 'stopped', `"${h.name}" restarted while Claude Code was working.`);
+      // The host restarted: sessions it no longer has can't finish their running turns.
+      if (restarted) {
+        const alive = new Set(strs(b.sessions, 1000));
+        for (const chat of chats.chats.values())
+          if (chat.kind === 'code' && chat.host === id && chat.run && !alive.has(chat.id)) endTurn(chat, 'stopped', `"${h.name}" restarted while Claude Code was working.`);
+      }
       announce();
       json(res, 200, { ok: true });
       return true;

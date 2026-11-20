@@ -45,7 +45,7 @@ Documents\Projects\
     CLAUDE.md
 ```
 
-- **Pick a project** in the menu at the top of the site. Each project keeps its own chat history in your browser.
+- **Pick a project** in the menu at the top of the site. Its chats are listed on the left; **New chat** starts another one in that project.
 - **New project…** in that menu creates the folder plus a starter CLAUDE.md (Overview, Tech stack, Structure, Commands, Conventions, Notes).
 - **Generate CLAUDE.md from code**: the model lists the project's files, reads the README and main source files, and writes the CLAUDE.md. Use it on existing projects, and again later to refresh it.
 - On every message the model gets the global CLAUDE.md plus the selected project's. Ask it to "remember" something and it decides which file it belongs in (project facts → project file, things about you → global).
@@ -57,7 +57,12 @@ To keep context small, the model has a **search tool** (`search_project`) that r
 What the model can and can't touch:
 - It can **read** files inside the selected project folder only. Paths outside it (`..\`, absolute paths, symlinks out) are refused.
 - It can't read `.env` files, private keys, certificates or similar secret files, and it skips folders like `.git`, `node_modules`, `bin`, `obj` and `venv`.
-- The only files it can **write** are CLAUDE.md files.
+- The only files it can **write** are CLAUDE.md files. To change code or run commands, start a **Claude Code** session instead (see below).
+
+**Web access in chats.** Plain chats can search the web (`web_search`, through the same Exa key as Claude Code's WebSearch) and read web pages (`web_fetch`, in parts of about 12,000 characters). The model is told today's date, so it searches for current information.
+- Pages on the PC itself, your home network or your tailnet are refused, so a web page can't trick the model into reaching local services.
+- `"allowWebTools": false` in `bridge/config.json` turns both off. Without an Exa key, chats can still read pages but not search.
+- Measured: "what's the latest Node.js LTS?" took one search and one page read, about 48 s, and the answer was correct with sources.
 
 ## Images and video
 
@@ -168,7 +173,7 @@ The **Claude Code** button starts a Claude Code session on one of your computers
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.
 
-**Set up the PC** (once): `npm install --omit=optional` in the `host` folder, then restart the bridge. The bridge window shows `Claude Code host "<name>" connected`. To turn it off, set `"codeHost": false` in `bridge/config.json`; `"codeHostName"` changes the name shown.
+**Set up the PC** (once): `npm install --omit=optional` in the `host` folder, then restart the bridge. New project folders show up in the Claude Code dialog within a few seconds. The bridge window shows `Claude Code host "<name>" connected`. To turn it off, set `"codeHost": false` in `bridge/config.json`; `"codeHostName"` changes the name shown.
 
 **Add another computer.** It needs [Node.js](https://nodejs.org) 18.14+, Claude Code, and `claude-local` set up once (that saves the bridge address and token). Then run `claude-remote` in the folder you want to allow:
 - **Windows:** copy `cli\claude-remote.ps1` and `cli\claude-remote.cmd` next to `claude-local` (e.g. `%USERPROFILE%\.local\bin`).
@@ -181,7 +186,7 @@ The first run downloads `claude-remote.mjs` and installs the SDK (skipping the S
 
 | Option | What it does |
 |---|---|
-| `--root <folder>` | A folder sessions may work in (repeat for more). Default: the current folder. The website offers each root and the folders directly inside it; anything else is refused. |
+| `--root <folder>` | A folder sessions may work in (repeat for more). Default: the current folder. The website offers each root and the folders directly inside it (not cache or build folders like `__pycache__` or `node_modules`), and the list updates within seconds when you add a folder. Anything else is refused. |
 | `--name <name>` | How the computer appears on the website. Default: its computer name. |
 | `--update` | Download the latest `claude-remote` first. |
 | `--bridge <url>`, `--token <token>` | Use these instead of claude-local's saved ones. |
