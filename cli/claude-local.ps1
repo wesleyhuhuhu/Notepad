@@ -11,7 +11,7 @@
     claude-local --continue
     claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
     claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
-    claude-local --max-output 12000      longest reply, thinking included (default 8192)
+    claude-local --max-output 12000      longest reply, thinking included (default 16384)
     claude-local --setup                 change the saved address or token
 
   If PowerShell blocks the script, run claude-local.cmd instead, or:
@@ -24,7 +24,7 @@ $cfgFile = Join-Path $cfgDir 'config.json'
 $coreTools = 'Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch'
 
 # --- our own options (double-dash, so they never clash with claude's short flags) ---
-$setup = $false; $allTools = $false; $context = 0; $maxOutput = 8192
+$setup = $false; $allTools = $false; $context = 0; $maxOutput = 16384
 $pass = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch ($args[$i]) {
@@ -98,7 +98,7 @@ try {
   # The model's real context window, so auto-compact happens before it overflows.
   $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$ctx"
   # Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
-  # reply cap leaves more room for work: 8192 -> compacts at about ctx - 21k (34k of 55k).
+  # reply cap: 16384 (room for long thinking) -> compacts at about ctx - 29k.
   $env:CLAUDE_CODE_MAX_OUTPUT_TOKENS = "$maxOutput"
   if ($ctx - $maxOutput - 13000 -lt 10000) {
     Write-Host ("A {0:N0}-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." -f $ctx) -ForegroundColor Yellow

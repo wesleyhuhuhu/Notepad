@@ -127,7 +127,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 | Option | What it does |
 |---|---|
 | `--all-tools` | Every Claude Code tool. By default only Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch are sent, which keeps the setup at ~5.3k tokens instead of ~16.5k. |
-| `--max-output N` | Longest reply, thinking included (default 8192). Lower leaves more room before compaction; higher allows longer thinking. |
+| `--max-output N` | Longest reply, thinking included (default 16384). Lower leaves more room before compaction; higher allows longer thinking. |
 | `--context N` | Tell Claude Code a smaller context than the loaded model's. |
 | `--setup` | Change the saved address or token. |
 
@@ -137,7 +137,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
   - `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` pointing at the bridge;
   - every model setting set to that model;
   - **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** set to the model's real context, which is what makes Claude Code auto-compact before it overflows. (The `--autocompact` flag and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only accept 100k–1M.)
-  - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` set to 8192.
+  - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` set to 16384.
 
 **Web access.**
 - **WebFetch** reads a page at an address (it asks before each new site). Bash can also use `curl`, `git clone` and `gh`.
@@ -146,13 +146,18 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 - **Cost:** Exa's free balance is $10 a month. With the defaults (`"webSearchType": "auto"`, 8 results, 1,500-character excerpts) a search costs about $0.007, so roughly 1,400 searches a month; `"lite"` costs about $0.004. The bridge window logs each search with its cost.
 - **Other services:** `"webSearchProvider"` picks the service. `exa` is the only one so far; others can be added to `searchProviders` in `bridge/server.js`.
 
-**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 21k with the launcher's 8,192 reply cap. With the default 96k context that's about **75k** (about 69k when loaded at 90k). Measured earlier with a 55.3k context:
+**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 29k with the 16,384 reply cap (launchers and website sessions). With the default 96k context that's about **67k** (about 61k when loaded at 90k).
+
+The reply cap covers thinking too. At 8,192 a long think, for example while weighing several pages of web search results, could hit it ("API Error: Claude's response exceeded the 8192 output token maximum"), so the default is now 16,384. Measured earlier with a 55.3k context:
 
 | Reply cap | Free for work | Compacts at about |
 |---|---|---|
 | 32,000 (Claude Code's default) | 17.3k | 22k |
-| **8,192 (launcher default)** | **29.2k** | **34k** |
+| **16,384 (launcher default)** | about 21k | about 26k |
+| 8,192 | 29.2k | 34k, but long thinking can hit the cap |
 | 4,096 | 33.3k | 38k, but long thinking may get cut off |
+
+**Thinking amount.** Through LM Studio this model only reliably supports thinking on or off. `reasoning_effort` (low/medium/high) and Claude-style thinking budgets made no consistent difference in tests. Turning thinking off is faster but got a simple arithmetic question wrong, so it's left on.
 
 **Tested:**
 - **Windows:** Claude Code found and fixed two bugs in a small Python project and ran its tests, in 29 seconds.
@@ -182,7 +187,7 @@ The **Claude Code** button starts a Claude Code session on one of your computers
   - **Allow file changes and commands (no approvals):** it works on its own. Use it in folders you don't mind it changing.
   - In every mode, web searches and page reads never ask, reading files never asks, and anything outside the session's folder still asks.
 - **Attachments:** the paperclip (or paste or drag) takes images, videos and any other file, up to 10 MB each and 25 MB per message. Images and video frames go to the model directly. Other files are saved in the session's folder under `uploads/` (never overwriting) and Claude Code is told where they are.
-- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 21k tokens before the end.
+- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 29k tokens before the end (its 16,384-token reply cap plus about 13k).
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.

@@ -12,7 +12,7 @@
 #   claude-local --continue
 #   claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
 #   claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
-#   claude-local --max-output 12000      longest reply, thinking included (default 8192)
+#   claude-local --max-output 12000      longest reply, thinking included (default 16384)
 #   claude-local --setup                 change the saved address or token
 #
 # Install:  mkdir -p ~/bin && cp claude-local.sh ~/bin/claude-local && chmod +x ~/bin/claude-local
@@ -22,13 +22,13 @@ CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-local"
 CFG_FILE="$CFG_DIR/config"
 CORE_TOOLS="Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch"
 
-setup=0; all_tools=0; context=0; max_output=8192; pass=()
+setup=0; all_tools=0; context=0; max_output=16384; pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --setup) setup=1 ;;
     --all-tools) all_tools=1 ;;
     --context) shift; context="${1:-0}" ;;
-    --max-output) shift; max_output="${1:-8192}" ;;
+    --max-output) shift; max_output="${1:-16384}" ;;
     *) pass+=("$1") ;;
   esac
   shift
@@ -88,7 +88,7 @@ done
 # The model's real context window, so auto-compact happens before it overflows.
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"
 # Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
-# reply cap leaves more room for work: 8192 -> compacts at about ctx - 21k (34k of 55k).
+# reply cap: 16384 (room for long thinking) -> compacts at about ctx - 29k.
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$max_output"
 if [ $(( ctx - max_output - 13000 )) -lt 10000 ]; then
   echo "A $ctx-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." >&2
