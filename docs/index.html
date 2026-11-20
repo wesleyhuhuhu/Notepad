@@ -201,6 +201,7 @@ aside#mdpanel.open { display: flex; }
 .side-empty { color: var(--muted); font-size: 13px; padding: 8px 10px; }
 .side-sec { font-size: 11.5px; color: var(--muted); padding: 10px 8px 3px; letter-spacing: .03em; }
 .citem .st.approval { background: var(--warn); }
+.citem .tag { display: inline-block; font-size: 10.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-right: 5px; vertical-align: 1px; }
 .citem .host { font-size: 11px; color: var(--muted); flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .codebar { font-size: 12.5px; color: var(--muted); margin: 0 0 16px; display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center; }
 .codebar code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
@@ -621,8 +622,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const box = $('chatList');
     box.textContent = '';
     const byTime = (a, b) => b.updatedAt - a.updatedAt;
-    const code = chatList.filter((c) => c.kind === 'code').sort(byTime);
-    const items = chatList.filter((c) => c.kind !== 'code' && (c.project || '') === project).sort(byTime);
+    // Sessions in a project folder are listed with that project; the rest (other folders and computers) on their own.
+    const code = chatList.filter((c) => c.kind === 'code' && !c.project).sort(byTime);
+    const items = chatList.filter((c) => (c.project || '') === project).sort(byTime);
     const section = (text) => { const h = div('side-sec'); h.textContent = text; box.appendChild(h); };
     if (code.length) {
       section('Claude Code sessions');
@@ -647,6 +649,11 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     st.title = { approval: 'Waiting for your approval', running: 'Working…', queued: 'Waiting for the model', unseen: 'Finished', error: 'Ended with an error' }[k] || '';
     const t = div('t');
     t.textContent = c.title || 'New chat';
+    if (c.kind === 'code' && c.project) {
+      const tag = div('tag');
+      tag.textContent = 'Claude Code';
+      t.prepend(tag);
+    }
     t.title = c.title || '';
     const sub = div('sub');
     sub.textContent = ago(c.updatedAt);
@@ -742,7 +749,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     store.set('chat', c.id);
     setChatHash(c.id);
     markSeen(c);
-    if (c.kind !== 'code' && (c.project || '') !== project) switchProject(c.project || '', { keepChat: true });
+    // A session outside any project leaves the project menu as it is.
+    if ((c.kind !== 'code' || c.project) && (c.project || '') !== project) switchProject(c.project || '', { keepChat: true });
     render();
     updateSend();
     renderChatList();
@@ -926,7 +934,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       await apiJson('/api/projects', { method: 'POST', body: JSON.stringify({ name, description: $('npDesc').value }) });
       $('newProject').close('created');
       await loadProjects();
-      switchProject(name);
+      if (npForCode && $('codeDlg').open) {
+        switchProject(name, { keepChat: true });
+        fillDirs(projectFolder(name));
+      } else switchProject(name);
     } catch (e) {
       $('npResult').textContent = e.message;
     } finally {
@@ -1721,7 +1732,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     fillDirs();
   }
 
-  function fillDirs() {
+  // On this PC a folder in the projects folder is a project (its own CLAUDE.md and chat list).
+  const projectFolder = (name) => {
+    const root = status && status.projectsRoot;
+    return root ? root.replace(/[\\/]+$/, '') + (root.includes('\\') ? '\\' : '/') + name : '';
+  };
+  const NEW_FOLDER = '__new_project__';
+
+  function fillDirs(pick) {
     const h = hostOf($('cdHost').value);
     const sel = $('cdDir');
     sel.innerHTML = '';
@@ -1731,9 +1749,37 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       o.textContent = h.roots.includes(f) ? f : baseName(f);
       sel.appendChild(o);
     }
-    const want = store.get('codeDir', '') || (project && h ? h.folders.find((f) => baseName(f) === project) : '');
+    if (pick && h && !h.folders.includes(pick)) {
+      // Just created: the computer's own list catches up in a moment.
+      const o = document.createElement('option');
+      o.value = pick;
+      o.textContent = baseName(pick);
+      sel.appendChild(o);
+    }
+    if (h && h.managed && status && status.projectsRoot) {
+      const o = document.createElement('option');
+      o.value = NEW_FOLDER;
+      o.textContent = '+ New project…';
+      sel.appendChild(o);
+    }
+    // The selected project's folder first, else the folder used last time.
+    const projectDir = project && h && h.managed ? [...sel.options].map((o) => o.value).find((v) => v !== NEW_FOLDER && baseName(v) === project) : '';
+    const want = pick || projectDir || store.get('codeDir', '');
     if (want && [...sel.options].some((o) => o.value === want)) sel.value = want;
+    lastDir = sel.value;
     $('cdGo').disabled = !h || !h.online;
+  }
+  let lastDir = '';
+  let npForCode = false; // the New project dialog was opened from the Claude Code dialog
+
+  function dirChanged() {
+    if ($('cdDir').value !== NEW_FOLDER) { lastDir = $('cdDir').value; return; }
+    $('cdDir').value = lastDir;
+    npForCode = true;
+    $('npName').value = '';
+    $('npDesc').value = '';
+    $('npResult').textContent = '';
+    $('newProject').showModal();
   }
 
   async function startCodeSession() {
@@ -1747,7 +1793,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       store.set('codeHost', $('cdHost').value);
       store.set('codeDir', $('cdDir').value);
       $('codeDlg').close();
-      upsertSummary({ id: c.id, kind: 'code', title: c.title, project: null, updatedAt: c.updatedAt, state: 'idle', lastRun: null, host: c.host, cwd: c.cwd, waiting: 0 });
+      upsertSummary({ id: c.id, kind: 'code', title: c.title, project: c.project || null, updatedAt: c.updatedAt, state: 'idle', lastRun: null, host: c.host, cwd: c.cwd, waiting: 0 });
       await openChat(c.id);
       $('input').focus();
     } catch (e) {
@@ -1917,7 +1963,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('btnNew').addEventListener('click', () => { newChat(); $('input').focus(); });
   $('btnSide').addEventListener('click', openSide);
   $('btnCode').addEventListener('click', openCodeDialog);
-  $('cdHost').addEventListener('change', fillDirs);
+  $('cdHost').addEventListener('change', () => fillDirs());
+  $('cdDir').addEventListener('change', dirChanged);
+  $('newProject').addEventListener('close', () => { npForCode = false; });
   $('cdGo').addEventListener('click', startCodeSession);
   $('sideShade').addEventListener('click', closeSide);
   $('project').addEventListener('change', () => {

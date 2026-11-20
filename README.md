@@ -168,6 +168,12 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 The **Claude Code** button starts a Claude Code session on one of your computers. Your local model does the work, and you watch and steer it from the website, on any device. It's like Claude Code's own Remote Control, which only works with Anthropic's servers.
 
 - **How it runs:** a small program, `claude-remote`, runs Claude Code on that computer through the Claude Agent SDK. It connects **out** to your PC's bridge (through the Funnel address), so nothing needs to be opened on that computer. The PC starts its own copy with the bridge, for the folders in `Documents\Projects`.
+- **Projects:** on the PC, a session in a project folder belongs to that project.
+  - It's listed with the project's chats, tagged **Claude Code**.
+  - The header shows its folder instead of the project menu, and the **CLAUDE.md** button opens that project's file.
+  - Claude Code reads the project's CLAUDE.md and the global one. If the project has none, a starter CLAUDE.md is created when the session starts, for Claude Code to fill in when you ask.
+  - In the dialog, the selected project's folder is picked for you, and **+ New project…** creates one (folder plus starter CLAUDE.md).
+  - Sessions in other folders, or on other computers, are listed under **Claude Code sessions**.
 - **Approvals:** every command and file change shows up as a card: **Allow**, **Allow for this session** or **Deny**. "Allow file changes; ask before commands" skips the cards for edits.
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.

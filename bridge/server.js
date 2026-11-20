@@ -1663,7 +1663,22 @@ const chats = require('./chats')({
   cfg, log, friendlyError, httpError, readJson, json, openEventStream, getProjectDir, chatCore, compactCore,
 });
 // Computers that run Claude Code sessions for the website (bridge/hosts.js, host/claude-remote.mjs).
-const hosts = require('./hosts')({ log, httpError, readJson, json, openEventStream, chats });
+// A folder directly inside projectsRoot is that project (Claude Code sessions in it belong to it).
+function projectForFolder(dir) {
+  if (!cfg.projectsRootAbs || typeof dir !== 'string' || !dir) return null;
+  const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const full = path.resolve(dir);
+  const name = path.basename(full);
+  return same(path.dirname(full), path.resolve(cfg.projectsRootAbs)) && validProjectName(name) ? name : null;
+}
+// Gives a project the starter CLAUDE.md if it has none. Returns true if it wrote one.
+async function ensureProjectMd(name) {
+  const t = await mdTarget(name);
+  if ((await readMd(t)) !== null) return false;
+  await writeMd(t, projectTemplate(name, ''), 'new Claude Code session (starter)');
+  return true;
+}
+const hosts = require('./hosts')({ log, httpError, readJson, json, openEventStream, chats, projectForFolder, ensureProjectMd, getProjectDir });
 
 const server = http.createServer(async (req, res) => {
   applyCors(req, res);
@@ -1748,7 +1763,7 @@ const server = http.createServer(async (req, res) => {
 
 module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages, fetchPage, privateAddress, htmlToText };
 
-if (require.main === module) chats.init().then(() => server.listen(cfg.port, cfg.host, () => {
+if (require.main === module) chats.init().then(() => hosts.adoptExisting()).then(() => server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);
   log(`LM Studio:        ${cfg.lmStudioUrl}`);
   log(`Global CLAUDE.md: ${cfg.claudeMdAbs}`);

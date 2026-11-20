@@ -43,15 +43,30 @@ module.exports = function createHosts(d) {
   }
 
   // ----------------------------------------------------- website side --
-  function validateNew(body) {
+  async function validateNew(body) {
     const h = hosts.get(String(body.host || ''));
     if (!h) throw httpError(400, 'Pick a computer to run Claude Code on.');
     const cwd = typeof body.cwd === 'string' ? body.cwd : '';
-    if (!h.folders.includes(cwd) && !h.roots.includes(cwd)) throw httpError(400, `That folder isn't one "${h.name}" allows.`);
+    // On this PC, a project folder belongs to that project (its chats list, its CLAUDE.md).
+    const project = h.managed ? d.projectForFolder(cwd) : null;
+    if (project) await d.getProjectDir(project); // must exist (a just-created one may not be in h.folders yet)
+    else if (!h.folders.includes(cwd) && !h.roots.includes(cwd)) throw httpError(400, `That folder isn't one "${h.name}" allows.`);
+    if (project && (await d.ensureProjectMd(project))) log(`Created a starter CLAUDE.md for project "${project}"`);
     return {
       title: `${path.basename(cwd) || cwd} · ${h.name}`,
-      fields: { host: h.id, hostName: h.name, cwd, permissionMode: body.permissionMode === 'acceptEdits' ? 'acceptEdits' : 'default' },
+      fields: { host: h.id, hostName: h.name, cwd, project, permissionMode: body.permissionMode === 'acceptEdits' ? 'acceptEdits' : 'default' },
     };
+  }
+
+  // Sessions made before they could belong to a project: attach the ones in a project folder.
+  async function adoptExisting() {
+    for (const chat of chats.chats.values()) {
+      if (chat.kind !== 'code' || chat.project) continue;
+      const project = d.projectForFolder(chat.cwd);
+      if (!project) continue;
+      chat.project = project;
+      await chats.saveNow(chat);
+    }
   }
 
   async function message(chat, body) {
@@ -324,7 +339,7 @@ module.exports = function createHosts(d) {
     run();
   }
 
-  const api = { list, validateNew, message, stop, permission, end, handle, startLocalHost };
+  const api = { list, validateNew, adoptExisting, message, stop, permission, end, handle, startLocalHost };
   chats.setCode(api);
   return api;
 };

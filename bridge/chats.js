@@ -416,7 +416,7 @@ module.exports = function createChats(d) {
   async function createChat(body) {
     if (body.kind === 'code') {
       if (!code) throw httpError(400, 'Claude Code sessions are not available on this bridge.');
-      const extra = code.validateNew(body);
+      const extra = await code.validateNew(body);
       const now = Date.now();
       const chat = { id: newId(), kind: 'code', title: extra.title, project: null, createdAt: now, updatedAt: now, seq: 0, messages: [], ...extra.fields };
       chats.set(chat.id, chat);
