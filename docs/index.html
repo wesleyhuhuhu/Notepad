@@ -169,6 +169,68 @@ aside#mdpanel.open { display: flex; }
   aside#mdpanel.open { position: fixed; inset: 0; width: auto; z-index: 20; border: none; }
 }
 
+/* Chat list (stored on the PC). A sidebar on wide screens, a drawer on phones. */
+#side {
+  width: 260px; flex: none; border-right: 1px solid var(--border); background: var(--panel);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.side-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 4px; }
+.side-head button { flex: 1; }
+.side-head .label { flex: 1; min-width: 0; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#chatList { flex: 1; overflow-y: auto; padding: 4px 6px 10px; overscroll-behavior: contain; }
+.citem { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+.citem:hover { background: var(--chip); }
+.citem.active { background: var(--user-bubble); }
+.citem .t { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.citem .sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; flex: none; }
+.citem .st { width: 8px; height: 8px; border-radius: 50%; flex: none; background: transparent; }
+.citem .st.running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.citem .st.queued { background: var(--muted); }
+.citem .st.unseen { background: var(--ok); }
+.citem .st.error { background: var(--bad); }
+.citem .act { display: none; gap: 2px; flex: none; }
+.citem.active .act { display: inline-flex; }
+.citem.active .sub { display: none; }
+.citem .act button { padding: 1px 6px; font-size: 12px; border-color: transparent; background: none; color: var(--muted); }
+.citem .act button:hover { color: var(--text); border-color: var(--border); }
+.side-empty { color: var(--muted); font-size: 13px; padding: 8px 10px; }
+.side-sec { font-size: 11.5px; color: var(--muted); padding: 10px 8px 3px; letter-spacing: .03em; }
+.citem .st.approval { background: var(--warn); }
+.citem .host { font-size: 11px; color: var(--muted); flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codebar { font-size: 12.5px; color: var(--muted); margin: 0 0 16px; display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center; }
+.codebar code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.codebar .off { color: var(--warn); font-weight: 600; }
+.blk-tool { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; background: var(--panel); }
+.blk-tool summary { padding: 5px 10px; cursor: pointer; font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blk-tool.ok summary::before { content: "✓ "; color: var(--ok); }
+.blk-tool.bad summary::before { content: "✕ "; color: var(--bad); }
+.blk-tool.pending summary::before { content: "… "; color: var(--muted); }
+.blk-tool pre, .perm pre {
+  margin: 0; padding: 8px 10px; font-size: 12px; font-family: var(--mono); max-height: 260px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.blk-tool pre { border-top: 1px solid var(--border); }
+.cblocks .body { margin: 6px 0; }
+.perm { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin: 8px 0; background: var(--panel); }
+.perm .q { font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+.perm pre { background: var(--code-bg); border-radius: 6px; margin-bottom: 10px; }
+.perm .row { justify-content: flex-start; }
+.perm.done { border-style: dashed; border-color: var(--border); color: var(--muted); padding: 5px 12px; font-size: 13px; }
+.turnfoot { font-size: 12px; color: var(--muted); margin-top: 6px; }
+body.code-mode .composer .meta, body.code-mode #attach { display: none; }
+#btnSide { display: none; padding: 5px 9px; }
+#sideShade { display: none; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (max-width: 860px) {
+  #btnSide { display: inline-block; }
+  #side {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 30; width: min(300px, 85vw);
+    transform: translateX(-105%); transition: transform .2s ease; box-shadow: 0 0 24px rgb(0 0 0 / .25);
+  }
+  #side.open { transform: none; }
+  #side.open + #sideShade { display: block; position: fixed; inset: 0; z-index: 29; background: rgb(0 0 0 / .35); }
+}
+
 dialog {
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text);
   width: min(520px, calc(100vw - 32px)); padding: 20px;
@@ -196,17 +258,25 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 </head>
 <body>
 <header>
+  <button id="btnSide" title="Chats" aria-label="Show chats">☰</button>
   <h1>Local LLM</h1>
   <select id="project" title="Project"><option value="">No project</option></select>
   <div class="status" title="Bridge status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
   <div class="actions">
     <button id="btnMd" title="View and edit CLAUDE.md">CLAUDE.md</button>
-    <button id="btnNew" title="Clear this chat">New chat</button>
     <button id="btnSettings" title="Settings">Settings</button>
   </div>
 </header>
 
 <div class="layout">
+  <aside id="side" aria-label="Chats">
+    <div class="side-head">
+      <button id="btnNew" class="primary" title="Start a new chat with your model">New chat</button>
+      <button id="btnCode" title="Start a Claude Code session on one of your computers">Claude Code</button>
+    </div>
+    <div id="chatList"></div>
+  </aside>
+  <div id="sideShade"></div>
   <div class="chat-col">
     <div class="msgwrap">
       <div id="messages" tabindex="-1"><div class="inner" id="list"></div></div>
@@ -249,6 +319,34 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     </div>
   </aside>
 </div>
+
+<dialog id="codeDlg">
+  <form method="dialog">
+    <h2>New Claude Code session</h2>
+    <p class="hint-top">Claude Code runs on the computer you pick, with your local model. It asks here before it runs a command or changes a file, and keeps working if you close this page.</p>
+    <div class="field">
+      <label for="cdHost">Computer</label>
+      <select id="cdHost"></select>
+      <div class="hint" id="cdHostHint"></div>
+    </div>
+    <div class="field">
+      <label for="cdDir">Folder</label>
+      <select id="cdDir"></select>
+    </div>
+    <div class="field">
+      <label for="cdMode">Approvals</label>
+      <select id="cdMode">
+        <option value="default">Ask before every file change and command</option>
+        <option value="acceptEdits">Allow file changes; ask before commands</option>
+      </select>
+    </div>
+    <div class="row">
+      <span class="grow err" id="cdResult"></span>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button type="button" class="primary" id="cdGo">Start</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="newProject">
   <form method="dialog" id="newProjectForm">
@@ -358,16 +456,35 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   let project = store.get('project', '');
   let projects = [];
   let status = null;
-  let messages = [];
-  let busy = null; // AbortController while streaming
+  // Chats live on the PC (bridge/chats). This page shows one and follows its changes live.
+  let chatList = [];      // summaries of every chat on the PC
+  let chat = null;        // the open chat, or null for a new one that isn't saved yet
+  let messages = [];      // chat.messages
+  let lastSeq = 0;        // the last change applied to the open chat
+  let streamAbort = null; // stops following the open chat
+  let listAbort = null;   // stops following the chat list
+  let sending = false;    // a message is being uploaded
   let mdScope = 'project';
+  let hostList = [];     // computers that can run Claude Code sessions
+  const running = () => !!(chat && chat.run);
+  const isCode = () => !!(chat && chat.kind === 'code');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const chatFromHash = () => new URLSearchParams(location.hash.slice(1)).get('chat') || '';
+  const setChatHash = (id) => {
+    if (chatFromHash() === (id || '')) return;
+    history.replaceState(null, '', location.pathname + location.search + (id ? '#chat=' + id : ''));
+  };
 
   window.addEventListener('hashchange', () => {
-    if (!consumeHash()) return;
-    settings.bridgeUrl = store.get('bridgeUrl', '');
-    settings.token = store.get('token', '');
-    if ($('settings').open) $('settings').close('cancel');
-    connect();
+    if (consumeHash()) {
+      settings.bridgeUrl = store.get('bridgeUrl', '');
+      settings.token = store.get('token', '');
+      if ($('settings').open) $('settings').close('cancel');
+      connect();
+      return;
+    }
+    const id = chatFromHash();
+    if (id && (!chat || chat.id !== id)) openChat(id);
   });
 
   const applyTheme = () => {
@@ -389,7 +506,6 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     return j;
   }
   const q = (p) => (p ? '?project=' + encodeURIComponent(p) : '');
-  const historyKey = () => 'messages:' + (project || '');
 
   // ------------------------------------------------------------ status --
   function setStatus(kind, text) {
@@ -462,17 +578,338 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     sel.value = project;
   }
 
-  function switchProject(name) {
-    if (busy) busy.abort();
+  // Picking a project shows its chats and opens the most recent one (or a new chat).
+  function switchProject(name, opts = {}) {
     project = name;
     mdScope = project ? 'project' : 'global';
     store.set('project', project);
     $('project').value = project;
-    messages = store.get(historyKey(), []);
-    render();
+    renderChatList();
     updateMdControls();
     if ($('mdpanel').classList.contains('open')) loadMd();
+    if (opts.keepChat || (chat && (chat.project || '') === project)) return;
+    const recent = chatList.find((c) => (c.project || '') === project);
+    if (recent) openChat(recent.id);
+    else newChat();
   }
+
+  // ------------------------------------------------------------- chats --
+  const seen = store.get('seen', {});
+  function markSeen(c) {
+    if (!c || !c.lastRun) return;
+    seen[c.id] = c.lastRun.at;
+    store.set('seen', seen);
+  }
+  const unseen = (c) => c.lastRun && c.lastRun.at > (seen[c.id] || 0) && !(chat && chat.id === c.id);
+
+  function ago(t) {
+    const s = (Date.now() - t) / 1000;
+    if (s < 60) return 'now';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    if (s < 604800) return Math.floor(s / 86400) + 'd';
+    return new Date(t).toLocaleDateString();
+  }
+
+  function renderChatList() {
+    const box = $('chatList');
+    box.textContent = '';
+    const byTime = (a, b) => b.updatedAt - a.updatedAt;
+    const code = chatList.filter((c) => c.kind === 'code').sort(byTime);
+    const items = chatList.filter((c) => c.kind !== 'code' && (c.project || '') === project).sort(byTime);
+    const section = (text) => { const h = div('side-sec'); h.textContent = text; box.appendChild(h); };
+    if (code.length) {
+      section('Claude Code sessions');
+      for (const c of code) box.appendChild(chatItem(c));
+    }
+    section(project ? `Chats in ${project}` : 'Chats (no project)');
+    if (!items.length) {
+      const e = div('side-empty');
+      e.textContent = 'No chats yet. Send a message to start one.';
+      box.appendChild(e);
+    }
+    for (const c of items) box.appendChild(chatItem(c));
+  }
+
+  function chatItem(c) {
+    const active = !!(chat && chat.id === c.id);
+    const it = div('citem' + (active ? ' active' : ''));
+    const st = div('st');
+    const k = c.waiting ? 'approval' : c.state === 'running' ? 'running' : c.state === 'queued' ? 'queued'
+      : unseen(c) ? (c.lastRun.state === 'error' ? 'error' : 'unseen') : '';
+    if (k) st.classList.add(k);
+    st.title = { approval: 'Waiting for your approval', running: 'Working…', queued: 'Waiting for the model', unseen: 'Finished', error: 'Ended with an error' }[k] || '';
+    const t = div('t');
+    t.textContent = c.title || 'New chat';
+    t.title = c.title || '';
+    const sub = div('sub');
+    sub.textContent = ago(c.updatedAt);
+    it.append(st, t, sub);
+    if (active) {
+      const act = div('act');
+      const ren = document.createElement('button');
+      ren.textContent = 'Rename';
+      ren.onclick = (e) => { e.stopPropagation(); renameChat(c); };
+      const del = document.createElement('button');
+      del.textContent = 'Delete';
+      del.onclick = (e) => { e.stopPropagation(); deleteChat(c); };
+      act.append(ren, del);
+      it.appendChild(act);
+    }
+    it.onclick = () => { if (!active) openChat(c.id); else closeSide(); };
+    return it;
+  }
+
+  function upsertSummary(s) {
+    const i = chatList.findIndex((c) => c.id === s.id);
+    const before = i >= 0 ? chatList[i] : null;
+    if (i >= 0) chatList[i] = s;
+    else chatList.push(s);
+    // Tell the user when a reply finishes while this page is in the background.
+    if (before && before.state !== 'idle' && s.state === 'idle' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(s.title || 'Local LLM', { body: s.lastRun && s.lastRun.state === 'error' ? 'Ended with an error' : 'Reply finished', tag: s.id });
+      } catch {}
+    }
+    if (s.waiting > ((before && before.waiting) || 0) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      try { new Notification(s.title || 'Claude Code', { body: 'Claude Code is waiting for your approval', tag: s.id + ':approve' }); } catch {}
+    }
+    if (chat && chat.id === s.id && s.lastRun) markSeen(s);
+    renderChatList();
+  }
+
+  async function loadChatList() {
+    const j = await apiJson('/api/chats');
+    chatList = j.chats;
+    renderChatList();
+  }
+
+  // Follows changes to the chat list (new chats, titles, replies starting and finishing).
+  async function watchList() {
+    if (listAbort) listAbort.abort();
+    const ac = (listAbort = new AbortController());
+    let delay = 1000;
+    while (!ac.signal.aborted) {
+      try {
+        const r = await api('/api/events', { signal: ac.signal });
+        if (!r.ok) throw new Error('Bridge error ' + r.status);
+        await loadChatList();
+        delay = 1000;
+        await readEvents(r, (ev) => {
+          if (ev.type === 'hello' || ev.type === 'hosts') { if (ev.hosts) { hostList = ev.hosts; hostsChanged(); } }
+          else if (ev.type === 'chat') upsertSummary(ev.chat);
+          else if (ev.type === 'chat_deleted') {
+            chatList = chatList.filter((c) => c.id !== ev.id);
+            renderChatList();
+          }
+        });
+      } catch {}
+      if (ac.signal.aborted) return;
+      await sleep(delay);
+      delay = Math.min(delay * 2, 15000);
+    }
+  }
+
+  function stopFollowing() {
+    if (streamAbort) streamAbort.abort();
+    streamAbort = null;
+  }
+
+  function newChat() {
+    stopFollowing();
+    chat = null;
+    updateMode();
+    messages = [];
+    lastSeq = 0;
+    setChatHash('');
+    render();
+    updateSend();
+    renderChatList();
+    closeSide();
+  }
+
+  function showChat(c) {
+    chat = c;
+    updateMode();
+    messages = c.messages;
+    lastSeq = c.seq || 0;
+    store.set('chat', c.id);
+    setChatHash(c.id);
+    markSeen(c);
+    if ((c.project || '') !== project) switchProject(c.project || '', { keepChat: true });
+    render();
+    updateSend();
+    renderChatList();
+  }
+
+  async function openChat(id) {
+    stopFollowing();
+    try {
+      showChat(await apiJson('/api/chats/' + id));
+    } catch (e) {
+      flashTray(e.message);
+      return newChat();
+    }
+    closeSide();
+    follow(id);
+  }
+
+  // Streams the open chat's changes. After a dropped connection it picks up where it left off.
+  async function follow(id) {
+    stopFollowing();
+    const ac = (streamAbort = new AbortController());
+    let delay = 1000;
+    while (!ac.signal.aborted && chat && chat.id === id) {
+      try {
+        const r = await api(`/api/chats/${id}/stream?since=${lastSeq}`, { signal: ac.signal });
+        if (r.status === 404) { if (chat && chat.id === id) newChat(); return; }
+        if (!r.ok) throw new Error('Bridge error ' + r.status);
+        delay = 1000;
+        await readEvents(r, (ev) => applyEvent(ev));
+      } catch {}
+      if (ac.signal.aborted) return;
+      await sleep(delay);
+      delay = Math.min(delay * 2, 15000);
+    }
+  }
+
+  const byId = (id) => (id ? messages.find((m) => m.id === id) : null);
+  const isStreaming = (m) => !!(chat && chat.run && chat.run.messageId === m.id);
+  const painting = new Set();
+  let paintFrame = 0;
+  function repaint(m) {
+    const el = elOf.get(m);
+    if (el && m.role === 'assistant') (m.blocks ? renderCodeTurn : renderAssistant)(el, m, isStreaming(m));
+  }
+  function paintSoon(m) {
+    painting.add(m);
+    if (paintFrame) return;
+    paintFrame = requestAnimationFrame(() => {
+      paintFrame = 0;
+      for (const x of painting) repaint(x);
+      painting.clear();
+      scrollDown();
+    });
+  }
+
+  // Applies one change to the open chat, exactly as the bridge applied it to the stored copy.
+  async function applyEvent(ev) {
+    if (!chat) return;
+    if (ev.seq) {
+      if (ev.seq <= lastSeq) return;
+      lastSeq = ev.seq;
+    }
+    switch (ev.type) {
+      case 'reload': {
+        // Too far behind to catch up event by event: load the whole chat again.
+        const c = await apiJson('/api/chats/' + chat.id);
+        if (chat && chat.id === c.id) showChat(c);
+        return;
+      }
+      case 'deleted':
+        return newChat();
+      case 'message': {
+        if (byId(ev.message.id)) return;
+        if (!messages.length) $('list').innerHTML = '';
+        messages.push(ev.message);
+        $('list').appendChild(msgEl(ev.message, isStreaming(ev.message)));
+        scrollDown(ev.message.role === 'user');
+        updateMeter();
+        return;
+      }
+      case 'run': {
+        const prevId = chat.run && chat.run.messageId;
+        const active = ev.state === 'queued' || ev.state === 'running';
+        chat.run = active ? { state: ev.state, kind: ev.kind, messageId: ev.messageId } : undefined;
+        const m = byId(ev.messageId || prevId);
+        if (m && m.blocks && !active) for (const b of m.blocks) if (b.type === 'permission' && b.state === 'pending') b.state = 'expired';
+        if (m) {
+          if (ev.state === 'queued') m.notice = 'Waiting for the model to finish another reply…';
+          else if (ev.state === 'running' && m.notice && m.notice.startsWith('Waiting')) m.notice = '';
+          if (!active) m.notice = '';
+          repaint(m);
+        }
+        if (!active) {
+          chat.lastRun = { state: ev.state, kind: ev.kind, at: Date.now() };
+          scrollDown();
+        }
+        if (ev.kind === 'compact') compactEnded(ev);
+        updateSend();
+        updateMeter();
+        return;
+      }
+      case 'compacted': {
+        for (const id of ev.archived) {
+          const m = byId(id);
+          if (!m) continue;
+          m.archived = true;
+          const e = elOf.get(m);
+          if (e) e.classList.add('archived');
+        }
+        const after = byId(ev.after);
+        messages.splice(after ? messages.indexOf(after) + 1 : messages.length, 0, ev.summary);
+        const el = msgEl(ev.summary);
+        const ae = after && elOf.get(after);
+        if (ae && ae.isConnected) ae.after(el);
+        else $('list').appendChild(el);
+        updateMeter();
+        return;
+      }
+      case 'context': {
+        const m = byId(ev.id);
+        if (m) { m.ctxEstimate = ev.estimate; m.ctxContext = ev.context; }
+        updateMeter();
+        return;
+      }
+      case 'usage': {
+        const m = byId(ev.id);
+        if (m) m.usage = ev.usage;
+        updateMeter();
+        return;
+      }
+      case 'compact_status':
+        if (ev.text) $('cpResult').textContent = ev.text;
+        return;
+      case 'claude_md_updated':
+        mdUpdated(ev);
+        return;
+      case 'chat':
+        chat.title = ev.title;
+        return;
+      default: {
+        const m = byId(ev.id);
+        if (!m) return;
+        if (m.blocks) handleCodeEvent(m, ev);
+        else handleEvent(m, ev);
+        paintSoon(m);
+      }
+    }
+  }
+
+  async function renameChat(c) {
+    const title = prompt('Rename this chat', c.title || '');
+    if (title === null || !title.trim()) return;
+    try {
+      upsertSummary(await apiJson('/api/chats/' + c.id, { method: 'PATCH', body: JSON.stringify({ title }) }));
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  async function deleteChat(c) {
+    if (!confirm(`Delete "${c.title || 'this chat'}"? It moves to bridge/chats/.trash on your PC.`)) return;
+    try {
+      await apiJson('/api/chats/' + c.id, { method: 'DELETE' });
+      chatList = chatList.filter((x) => x.id !== c.id);
+      if (chat && chat.id === c.id) newChat();
+      else renderChatList();
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  function openSide() { $('side').classList.add('open'); }
+  function closeSide() { $('side').classList.remove('open'); }
 
   async function createProject() {
     const name = $('npName').value.trim();
@@ -589,6 +1026,18 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   function render() {
     const list = $('list');
     list.innerHTML = '';
+    if (isCode()) {
+      list.appendChild(codeBar());
+      if (!messages.length) {
+        const e = div('empty');
+        e.innerHTML = '<h2>Claude Code</h2><p></p>';
+        e.querySelector('p').textContent = 'Tell it what to do in this folder. It asks here before running commands or changing files.';
+        list.appendChild(e);
+      }
+      for (const m of messages) list.appendChild(msgEl(m, isStreaming(m)));
+      scrollDown(true);
+      return;
+    }
     if (!messages.length) {
       const p = projects.find((x) => x.name === project);
       const div = document.createElement('div');
@@ -615,7 +1064,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       updateMeter();
       return;
     }
-    for (const m of messages) list.appendChild(msgEl(m));
+    for (const m of messages) list.appendChild(msgEl(m, isStreaming(m)));
     scrollDown(true);
     updateMeter();
   }
@@ -647,7 +1096,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       }
       if (m.content) b.appendChild(document.createTextNode(m.content));
       el.appendChild(b);
-    } else renderAssistant(el, m, streaming);
+    } else if (m.blocks) renderCodeTurn(el, m, streaming);
+    else renderAssistant(el, m, streaming);
     return el;
   }
 
@@ -693,17 +1143,6 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
   });
 
-  // Keep at most 120 messages per chat in this browser, dropping compacted ones first.
-  const save = (key, msgs) => {
-    let out = msgs;
-    while (out.length > 120) {
-      const i = out.findIndex((m) => m.archived);
-      if (i < 0) break;
-      out = out.slice(0, i).concat(out.slice(i + 1));
-    }
-    store.set(key, out.slice(-120));
-  };
-
   // ------------------------------------------------------- compaction --
   // What gets sent: the latest summary (if any) plus the messages after it that aren't compacted.
   function sendable(chat) {
@@ -713,38 +1152,6 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
     const live = chat.slice(s + 1).filter((m) => m.role !== 'summary' && !m.archived && (m.role === 'user' || m.content));
     return { summary: s >= 0 ? chat[s] : null, live };
-  }
-  const payloadOf = (summary, live) => [
-    ...(summary ? [{ role: 'summary', content: summary.content }] : []),
-    ...live.map(apiMessage),
-  ];
-
-  // The bridge summarized the first `count` live messages: fade them, and insert the summary after them.
-  function applyCompaction(chat, ev, prev, live) {
-    const victims = live.slice(0, ev.count);
-    for (const m of victims) {
-      m.archived = true;
-      const e = elOf.get(m);
-      if (e) e.classList.add('archived');
-    }
-    if (prev) {
-      prev.archived = true;
-      const e = elOf.get(prev);
-      if (e) e.classList.add('archived');
-    }
-    const s = {
-      role: 'summary', content: ev.summary, auto: !!ev.auto, progressSaved: !!ev.progressSaved,
-      count: ev.count + ((prev && prev.count) || 0),
-      tokensBefore: ev.tokensBefore, tokensAfter: ev.tokensAfter, context: ev.context, at: Date.now(),
-    };
-    const last = victims[victims.length - 1];
-    chat.splice(last ? chat.indexOf(last) + 1 : chat.length, 0, s);
-    if (chat === messages) {
-      const lastEl = last && elOf.get(last);
-      if (lastEl && lastEl.isConnected) lastEl.after(msgEl(s));
-      else $('list').appendChild(msgEl(s));
-    }
-    return s;
   }
 
   // ------------------------------------------------------ context meter --
@@ -783,7 +1190,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const el = $('ctxMeter');
     el.hidden = !ctx;
     const live = sendable(messages).live.length;
-    $('btnCompact').disabled = !!busy || !live;
+    $('btnCompact').disabled = running() || !chat || !live;
     if (!ctx) return;
     const pct = Math.min(1, (info.used || 0) / ctx);
     const at = (status && status.compactAt) || 0.7;
@@ -814,14 +1221,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
           if (!line.startsWith('data:')) continue;
           let ev;
           try { ev = JSON.parse(line.slice(5)); } catch { continue; }
-          onEvent(ev);
+          await onEvent(ev);
         }
       }
     }
   }
 
   function openCompact() {
-    if (busy) return;
+    if (running() || !chat) return;
     const { summary, live } = sendable(messages);
     $('cpResult').textContent = live.length ? '' : summary ? 'Nothing new since the last compaction.' : 'This chat is empty.';
     $('cpGo').disabled = !live.length;
@@ -829,50 +1236,36 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     $('compactDlg').showModal();
   }
 
+  // Compaction runs on the PC; its progress arrives on the chat's stream (compact_status, compacted, run).
   async function runCompact() {
-    const chat = messages;
-    const chatKey = historyKey();
-    const { summary: prev, live } = sendable(chat);
-    if (!live.length) return;
-    busy = new AbortController();
+    if (!chat || running()) return;
     $('cpGo').disabled = true;
-    $('send').textContent = 'Stop';
     $('cpResult').textContent = 'Starting…';
-    updateMeter();
     try {
-      const r = await api('/api/compact', {
+      await apiJson(`/api/chats/${chat.id}/compact`, {
         method: 'POST',
-        signal: busy.signal,
         body: JSON.stringify({
-          messages: payloadOf(prev, live),
-          project: project || undefined,
           model: $('model').value || undefined,
           instructions: $('cpFocus').value,
           saveProgress: $('cpSave').checked,
           allowEdits: $('allowEdits').checked,
         }),
       });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Bridge error ' + r.status);
-      let done = false;
-      await readEvents(r, (ev) => {
-        if (ev.type === 'status' && ev.text) $('cpResult').textContent = ev.text;
-        else if (ev.type === 'compacted') { applyCompaction(chat, ev, prev, live); done = true; }
-        else if (ev.type === 'claude_md_updated') mdUpdated(ev);
-        else if (ev.type === 'error') throw new Error(ev.message);
-      });
-      if (!done) throw new Error('The bridge stopped before finishing the summary.');
-      save(chatKey, chat);
+    } catch (e) {
+      $('cpResult').textContent = /fetch|network|load failed/i.test(e.message) ? 'Could not reach your PC.' : e.message;
+      $('cpGo').disabled = false;
+    }
+  }
+
+  function compactEnded(ev) {
+    if (ev.state === 'queued' || ev.state === 'running') return;
+    $('cpGo').disabled = false;
+    if (!$('compactDlg').open) return;
+    if (ev.state === 'done') {
       $('cpFocus').value = '';
       $('compactDlg').close();
       scrollDown(true);
-    } catch (e) {
-      $('cpResult').textContent = e.name === 'AbortError' ? 'Stopped.' : /fetch|network|load failed/i.test(e.message) ? 'Could not reach your PC.' : e.message;
-    } finally {
-      busy = null;
-      $('send').textContent = 'Send';
-      $('cpGo').disabled = false;
-      updateMeter();
-    }
+    } else $('cpResult').textContent = ev.state === 'stopped' ? 'Stopped.' : ev.error || 'Compaction failed.';
   }
 
   // ------------------------------------------------------- attachments --
@@ -883,7 +1276,6 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   const MAX_FRAMES = 8;        // frames per video (about one per second for short clips)
   const MAX_IMAGES = 16;       // images per message, counting video frames
   let pending = [];            // attachments waiting in the composer
-  const liveParts = new WeakMap(); // full images for messages sent in this tab (not saved)
 
   function canvasJpeg(src, w, h, max, quality) {
     const scale = Math.min(1, max / Math.max(w, h));
@@ -1027,102 +1419,303 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     $('attach').title = ok ? 'Attach images or a video' : "The selected model can't see images";
   }
 
-  // What gets sent to the model for one stored message.
-  function apiMessage(m) {
-    if (m.role === 'user' && m.attachments && m.attachments.length) {
-      const parts = liveParts.get(m);
-      if (parts) return { role: 'user', content: parts };
-      const gone = m.attachments.map((a) => `[${a.kind === 'video' ? 'A video' : 'An image'} ("${a.name}") was attached here earlier but is no longer available.]`).join('\n');
-      return { role: 'user', content: [m.content, gone].filter(Boolean).join('\n\n') };
-    }
-    return { role: m.role, content: m.content };
+  // -------------------------------------------------------------- chat --
+  function updateSend() {
+    $('send').textContent = running() ? 'Stop' : sending ? 'Sending…' : 'Send';
+    $('send').disabled = sending && !running();
+    updateMeter();
   }
 
-  // -------------------------------------------------------------- chat --
+  function askToNotify() {
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  }
+
+  // Sends a message. The reply is written on the PC and streams in through follow(); it keeps
+  // going if this page closes. While a reply runs, the button stops it instead.
   async function send(textOverride) {
-    if (busy) { busy.abort(); return; }
+    if (running()) {
+      apiJson(`/api/chats/${chat.id}/stop`, { method: 'POST' }).catch((e) => flashTray(e.message));
+      return;
+    }
+    if (sending) return;
     const fromInput = typeof textOverride !== 'string';
     const text = (fromInput ? $('input').value : textOverride).trim();
     if (fromInput && pending.some((p) => p.loading)) { flashTray('Still reading attachments…'); return; }
-    const atts = fromInput ? pending.filter((p) => !p.error && p.images && p.images.length) : [];
+    const atts = fromInput && !isCode() ? pending.filter((p) => !p.error && p.images && p.images.length) : [];
     if (!text && !atts.length) return;
     if (!settings.bridgeUrl || !settings.token) { openSettings(); return; }
 
+    const keepText = $('input').value;
+    const keepPending = pending;
     if (fromInput) { $('input').value = ''; autosize(); pending = []; renderTray(); }
-    const chatProject = project;
-    const chatKey = historyKey();
-    const chat = messages;
-    if (!chat.length) $('list').innerHTML = '';
-    const user = { role: 'user', content: text };
-    if (atts.length) {
-      user.attachments = atts.map((a) => ({ kind: a.kind, name: a.name, thumb: a.thumb, frames: a.images.length }));
-      const notes = atts.map((a) => a.note).filter(Boolean);
-      const intro = [text || (atts.length > 1 ? 'Here are some images.' : 'Here is an image.'), ...notes].join('\n\n');
-      liveParts.set(user, [
-        { type: 'text', text: intro },
-        ...atts.flatMap((a) => a.images.map((url) => ({ type: 'image_url', image_url: { url } }))),
-      ]);
-    }
-    chat.push(user);
-    $('list').appendChild(msgEl(user));
-    const { summary: prevSummary, live } = sendable(chat);
-    const a = { role: 'assistant', content: '', reasoning: '', tools: [] };
-    chat.push(a);
-    const el = msgEl(a, true);
-    $('list').appendChild(el);
-    scrollDown(true);
-
-    busy = new AbortController();
-    $('send').textContent = 'Stop';
-    updateMeter();
-    let frame = 0;
-    const paint = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; renderAssistant(el, a, true); scrollDown(); }); };
-
+    sending = true;
+    updateSend();
     try {
-      const r = await api('/api/chat', {
+      if (!chat) {
+        const c = await apiJson('/api/chats', { method: 'POST', body: JSON.stringify({ project: project || undefined }) });
+        showChat(c);
+        follow(c.id);
+      }
+      if (isCode()) {
+        if (!messages.length) $('list').querySelector('.empty')?.remove();
+        await apiJson(`/api/chats/${chat.id}/messages`, { method: 'POST', body: JSON.stringify({ content: text }) });
+        askToNotify();
+        return;
+      }
+      await apiJson(`/api/chats/${chat.id}/messages`, {
         method: 'POST',
-        signal: busy.signal,
         body: JSON.stringify({
-          messages: payloadOf(prevSummary, live),
-          project: chatProject || undefined,
+          content: text,
+          attachments: atts.map((a) => ({ kind: a.kind, name: a.name, thumb: a.thumb, note: a.note, images: a.images })),
           model: $('model').value || undefined,
           allowEdits: $('allowEdits').checked,
           system: settings.system || undefined,
         }),
       });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        throw new Error(j.error || 'Bridge error ' + r.status);
-      }
-      let firstPrompt = 0;
-      await readEvents(r, (ev) => {
-        if (ev.type === 'compacted') {
-          applyCompaction(chat, ev, prevSummary, live);
-          save(chatKey, chat);
-        } else if (ev.type === 'context') {
-          a.ctxEstimate = ev.estimate;
-          a.ctxContext = ev.context;
-        } else if (ev.type === 'usage') {
-          // What the next message will start from: this request's prompt plus the visible answer.
-          // Tool results from this reply are not sent again, so later steps only count as the peak.
-          if (!firstPrompt) firstPrompt = ev.prompt;
-          const peak = Math.max((a.usage && a.usage.peak) || 0, ev.prompt + ev.completion);
-          a.usage = { used: firstPrompt + Math.max(0, ev.completion - ev.reasoning), peak, context: ev.context || loadedContext() };
-        } else handleEvent(a, ev);
-        if (ev.type === 'compacted' || ev.type === 'context' || ev.type === 'usage') updateMeter();
-        paint();
-      });
+      askToNotify();
     } catch (e) {
-      if (e.name !== 'AbortError') a.error = /Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach your PC. Is the bridge running?' : e.message;
-      else if (!a.content) a.error = 'Stopped.';
+      if (fromInput) { $('input').value = keepText; autosize(); pending = keepPending; renderTray(); }
+      flashTray(/Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach your PC. Is the bridge running?' : e.message);
     } finally {
-      busy = null;
-      $('send').textContent = 'Send';
-      if (frame) cancelAnimationFrame(frame), frame = 0;
-      renderAssistant(el, a, false);
-      scrollDown();
-      save(chatKey, chat);
-      updateMeter();
+      sending = false;
+      updateSend();
+    }
+  }
+
+  // ------------------------------------------------------ Claude Code --
+  function updateMode() {
+    document.body.classList.toggle('code-mode', isCode());
+    $('input').placeholder = isCode() ? 'Tell Claude Code what to do…' : 'Message your local model…';
+  }
+
+  const hostOf = (id) => hostList.find((h) => h.id === id);
+  const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || p;
+
+  function codeBar() {
+    const bar = div('codebar');
+    const h = hostOf(chat.host);
+    const where = document.createElement('span');
+    where.append('Claude Code on ', Object.assign(document.createElement('b'), { textContent: (h && h.name) || chat.hostName || chat.host }), ' in ');
+    where.appendChild(Object.assign(document.createElement('code'), { textContent: chat.cwd }));
+    bar.appendChild(where);
+    const mode = document.createElement('span');
+    mode.textContent = chat.permissionMode === 'acceptEdits' ? '· file changes allowed, commands ask' : '· asks before every change';
+    bar.appendChild(mode);
+    if (!h || !h.online) {
+      const off = document.createElement('span');
+      off.className = 'off';
+      off.textContent = 'Offline: start claude-remote on that computer to continue.';
+      bar.appendChild(off);
+    }
+    return bar;
+  }
+
+  function hostsChanged() {
+    if (isCode()) {
+      const old = $('list').querySelector('.codebar');
+      if (old) old.replaceWith(codeBar());
+    }
+    if ($('codeDlg').open) fillHosts();
+  }
+
+  function handleCodeEvent(m, ev) {
+    const B = m.blocks;
+    switch (ev.type) {
+      case 'block_start': B.push({ type: ev.kind, text: '' }); break;
+      case 'delta': {
+        let b = B[B.length - 1];
+        if (!b || (b.type !== 'text' && b.type !== 'thinking')) B.push((b = { type: 'text', text: '' }));
+        b.text += ev.text;
+        break;
+      }
+      case 'tool_use': B.push({ type: 'tool', id: ev.toolId, name: ev.name, input: ev.input }); break;
+      case 'tool_result': {
+        const b = B.find((x) => x.type === 'tool' && x.id === ev.toolId);
+        if (b) { b.ok = ev.ok; b.result = ev.result; }
+        break;
+      }
+      case 'permission_request':
+        B.push({ type: 'permission', requestId: ev.requestId, toolName: ev.toolName, input: ev.input, blockedPath: ev.blockedPath, state: 'pending' });
+        break;
+      case 'permission_resolved': {
+        const b = B.find((x) => x.type === 'permission' && x.requestId === ev.requestId);
+        if (b && b.state === 'pending') { b.state = ev.allow ? 'allowed' : 'denied'; if (ev.always) b.always = true; }
+        break;
+      }
+      case 'result': m.result = ev.result; m.notice = ''; break;
+      case 'status': m.notice = ev.text; break;
+      case 'error': if (ev.message) m.error = ev.message; break;
+    }
+  }
+
+  const parseInput = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
+  function toolLine(name, input) {
+    const a = parseInput(input) || {};
+    switch (name) {
+      case 'Bash': return '$ ' + (a.command || '');
+      case 'Read': case 'Write': case 'Edit': return name + ' ' + (a.file_path || '');
+      case 'Glob': case 'Grep': return name + ' ' + (a.pattern || '') + (a.path ? ' in ' + a.path : '');
+      case 'WebFetch': return 'WebFetch ' + (a.url || '');
+      case 'WebSearch': return 'WebSearch "' + (a.query || '') + '"';
+      default: return name;
+    }
+  }
+  // What an approval card shows: the command, or the file and the change.
+  function permDetail(name, input) {
+    const a = parseInput(input);
+    if (!a) return String(input || '');
+    if (name === 'Bash') return a.command + (a.description ? '\n\n# ' + a.description : '');
+    if (name === 'Write') return a.file_path + '\n\n' + String(a.content || '').slice(0, 3000);
+    if (name === 'Edit') return a.file_path + '\n\n- ' + String(a.old_string || '').slice(0, 1500) + '\n+ ' + String(a.new_string || '').slice(0, 1500);
+    return JSON.stringify(a, null, 2);
+  }
+  const permQuestion = (name) => ({ Bash: 'Run this command?', Write: 'Create or overwrite this file?', Edit: 'Make this change?', WebFetch: 'Open this web page?', WebSearch: 'Search the web?' }[name] || `Use ${name}?`);
+
+  async function answerPermission(b, allow, always, card) {
+    for (const btn of card.querySelectorAll('button')) btn.disabled = true;
+    try {
+      await apiJson(`/api/chats/${chat.id}/permission`, { method: 'POST', body: JSON.stringify({ requestId: b.requestId, allow, always }) });
+    } catch (e) {
+      for (const btn of card.querySelectorAll('button')) btn.disabled = false;
+      flashTray(e.message);
+    }
+  }
+
+  // Builds each block once and then only updates it, so open tool details stay open while it works.
+  function renderCodeTurn(el, m, streaming) {
+    let v = el._code;
+    if (!v) {
+      el.textContent = '';
+      v = el._code = { notice: div('notice'), blocks: div('cblocks'), err: div('err'), foot: div('turnfoot'), items: [] };
+      el.append(v.notice, v.blocks, v.err, v.foot);
+    }
+    const blocks = m.blocks || [];
+    v.notice.hidden = !streaming;
+    if (streaming) v.notice.textContent = m.notice || (blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : 'Working…');
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      let it = v.items[i];
+      if (!it || it.type !== b.type) {
+        it = v.items[i] = { type: b.type, key: null };
+        if (b.type === 'text') it.el = div('body');
+        else if (b.type === 'thinking') {
+          it.el = document.createElement('details');
+          it.el.className = 'reasoning';
+          it.sum = document.createElement('summary');
+          it.box = div();
+          it.el.append(it.sum, it.box);
+        } else if (b.type === 'tool') {
+          it.el = document.createElement('details');
+          it.sum = document.createElement('summary');
+          it.pre = document.createElement('pre');
+          it.el.append(it.sum, it.pre);
+        } else it.el = div('perm');
+        v.blocks.appendChild(it.el);
+      }
+      const last = streaming && i === blocks.length - 1;
+      if (b.type === 'text') {
+        if (it.key !== b.text) { it.key = b.text; it.el.innerHTML = md(b.text); }
+        it.el.classList.toggle('cursor', last);
+      } else if (b.type === 'thinking') {
+        it.sum.textContent = last ? 'Thinking…' : 'Thinking';
+        if (it.key !== b.text) { it.key = b.text; it.box.textContent = b.text; }
+      } else if (b.type === 'tool') {
+        it.el.className = 'blk-tool ' + (b.ok === undefined ? 'pending' : b.ok ? 'ok' : 'bad');
+        it.sum.textContent = toolLine(b.name, b.input);
+        it.sum.title = it.sum.textContent;
+        const res = b.result === undefined ? '(running…)' : b.result || '(no output)';
+        if (it.pre.textContent !== res) it.pre.textContent = res;
+      } else if (b.type === 'permission' && it.key !== b.state) {
+        it.key = b.state;
+        it.el.textContent = '';
+        if (b.state === 'pending') {
+          it.el.className = 'perm';
+          const q = div('q');
+          q.textContent = permQuestion(b.toolName);
+          const pre = document.createElement('pre');
+          pre.textContent = permDetail(b.toolName, b.input) + (b.blockedPath ? '\n\n(outside the session folder: ' + b.blockedPath + ')' : '');
+          const row = div('row');
+          const mk = (label, cls, fn) => { const x = document.createElement('button'); x.type = 'button'; x.textContent = label; if (cls) x.className = cls; x.onclick = fn; return x; };
+          row.append(
+            mk('Allow', 'primary', () => answerPermission(b, true, false, it.el)),
+            mk('Allow for this session', '', () => answerPermission(b, true, true, it.el)),
+            mk('Deny', '', () => answerPermission(b, false, false, it.el))
+          );
+          it.el.append(q, pre, row);
+        } else {
+          it.el.className = 'perm done';
+          const what = { allowed: b.always ? 'Allowed for this session' : 'Allowed', denied: 'Denied', expired: 'Not answered' }[b.state] || b.state;
+          it.el.textContent = `${what}: ${toolLine(b.toolName, b.input)}`;
+        }
+      }
+    }
+    v.err.hidden = !m.error;
+    if (m.error) v.err.textContent = m.error;
+    const r = m.result;
+    v.foot.hidden = !r;
+    if (r) v.foot.textContent = `${r.stopped ? 'Stopped' : r.isError ? 'Ended with an error' : 'Done'} · ${r.turns} step${r.turns === 1 ? '' : 's'} · ${Math.round((r.durationMs || 0) / 1000)} s`;
+  }
+
+  // ---- new session dialog
+  async function openCodeDialog() {
+    $('cdResult').textContent = '';
+    try { hostList = (await apiJson('/api/hosts')).hosts; } catch (e) { $('cdResult').textContent = e.message; }
+    fillHosts();
+    $('codeDlg').showModal();
+  }
+
+  function fillHosts() {
+    const sel = $('cdHost');
+    const keep = sel.value || store.get('codeHost', '');
+    sel.innerHTML = '';
+    for (const h of hostList) {
+      const o = document.createElement('option');
+      o.value = h.id;
+      o.textContent = h.name + (h.managed ? ' (this PC)' : '') + (h.online ? '' : ' (offline)');
+      o.disabled = !h.online;
+      sel.appendChild(o);
+    }
+    const first = hostList.find((h) => h.online);
+    sel.value = hostList.some((h) => h.id === keep && h.online) ? keep : first ? first.id : '';
+    $('cdHostHint').textContent = hostList.length
+      ? 'To add another computer, run claude-remote on it (see the README).'
+      : 'No computers are connected. The PC starts one with the bridge; on others, run claude-remote.';
+    fillDirs();
+  }
+
+  function fillDirs() {
+    const h = hostOf($('cdHost').value);
+    const sel = $('cdDir');
+    sel.innerHTML = '';
+    for (const f of h ? h.folders : []) {
+      const o = document.createElement('option');
+      o.value = f;
+      o.textContent = h.roots.includes(f) ? f : baseName(f);
+      sel.appendChild(o);
+    }
+    const want = store.get('codeDir', '') || (project && h ? h.folders.find((f) => baseName(f) === project) : '');
+    if (want && [...sel.options].some((o) => o.value === want)) sel.value = want;
+    $('cdGo').disabled = !h || !h.online;
+  }
+
+  async function startCodeSession() {
+    $('cdGo').disabled = true;
+    $('cdResult').textContent = '';
+    try {
+      const c = await apiJson('/api/chats', {
+        method: 'POST',
+        body: JSON.stringify({ kind: 'code', host: $('cdHost').value, cwd: $('cdDir').value, permissionMode: $('cdMode').value }),
+      });
+      store.set('codeHost', $('cdHost').value);
+      store.set('codeDir', $('cdDir').value);
+      $('codeDlg').close();
+      upsertSummary({ id: c.id, kind: 'code', title: c.title, project: null, updatedAt: c.updatedAt, state: 'idle', lastRun: null, host: c.host, cwd: c.cwd, waiting: 0 });
+      await openChat(c.id);
+      $('input').focus();
+    } catch (e) {
+      $('cdResult').textContent = e.message;
+    } finally {
+      $('cdGo').disabled = false;
     }
   }
 
@@ -1141,15 +1734,15 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       case 'round_end':
         if (a.content && !a.content.endsWith('\n\n')) a.content += '\n\n';
         break;
-      case 'tool_call': a.tools.push({ id: ev.id, name: ev.name, args: ev.args }); break;
+      case 'tool_call': a.tools.push({ id: ev.toolId, name: ev.name, args: ev.args }); break;
       case 'tool_result': {
-        const t = a.tools.find((x) => x.id === ev.id) || {};
+        const t = a.tools.find((x) => x.id === ev.toolId) || {};
         t.ok = ev.ok; t.result = ev.result;
         break;
       }
       case 'claude_md_updated': mdUpdated(ev); break;
       case 'status': a.notice = ev.text; break;
-      case 'error': a.error = ev.message; break;
+      case 'error': if (ev.message) a.error = ev.message; break;
     }
   }
 
@@ -1274,13 +1867,12 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   });
   $('send').addEventListener('click', () => send());
   $('btnSettings').addEventListener('click', openSettings);
-  $('btnNew').addEventListener('click', () => {
-    if (busy) busy.abort();
-    messages = [];
-    save(historyKey(), messages);
-    render();
-    $('input').focus();
-  });
+  $('btnNew').addEventListener('click', () => { newChat(); $('input').focus(); });
+  $('btnSide').addEventListener('click', openSide);
+  $('btnCode').addEventListener('click', openCodeDialog);
+  $('cdHost').addEventListener('change', fillDirs);
+  $('cdGo').addEventListener('click', startCodeSession);
+  $('sideShade').addEventListener('click', closeSide);
   $('project').addEventListener('change', () => {
     const v = $('project').value;
     if (v === NEW_PROJECT) {
@@ -1308,7 +1900,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('model').addEventListener('change', () => { store.set('model', $('model').value); updateAttach(); updateMeter(); });
   $('btnCompact').addEventListener('click', openCompact);
   $('cpGo').addEventListener('click', runCompact);
-  $('compactDlg').addEventListener('cancel', () => { if (busy) busy.abort(); });
+  $('compactDlg').addEventListener('cancel', () => {
+    if (chat && chat.run && chat.run.kind === 'compact') apiJson(`/api/chats/${chat.id}/stop`, { method: 'POST' }).catch(() => {});
+  });
   $('attach').addEventListener('click', () => $('fileInput').click());
   $('fileInput').addEventListener('change', () => { addFiles([...$('fileInput').files]); $('fileInput').value = ''; });
   $('input').addEventListener('paste', (e) => {
@@ -1328,16 +1922,33 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   });
   $('allowEdits').checked = store.get('allowEdits', true);
   $('allowEdits').addEventListener('change', () => store.set('allowEdits', $('allowEdits').checked));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshStatus(); loadProjects(); } });
+  // Phones pause background pages: when this one comes back, reconnect right away.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !settings.token) return;
+    refreshStatus();
+    loadProjects();
+    watchList();
+    if (chat) follow(chat.id);
+  });
 
   async function connect() {
     const s = await refreshStatus();
     await loadProjects();
-    switchProject(project);
+    try {
+      await loadChatList();
+    } catch {
+      chatList = [];
+    }
+    if (s) watchList();
+    const want = chatFromHash() || store.get('chat', '');
+    if (want && chatList.some((c) => c.id === want)) openChat(want);
+    else {
+      switchProject(project, { keepChat: true });
+      newChat();
+    }
     return s;
   }
 
-  messages = store.get(historyKey(), []);
   render();
   updateMdControls();
   connect().then((s) => { if (!s && (!settings.bridgeUrl || !settings.token)) openSettings(); });

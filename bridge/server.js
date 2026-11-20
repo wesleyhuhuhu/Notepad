@@ -45,6 +45,9 @@ const DEFAULTS = {
   // summarized (like Claude Code's auto-compact) so the chat can keep going.
   autoCompact: true,
   compactAt: 0.7,
+  // Claude Code sessions from the website: this PC starts host/claude-remote.mjs for its projects folder.
+  codeHost: true,
+  codeHostName: '',
   // Web search for Claude Code's WebSearch tool (see "web search" below). The key stays on this PC.
   webSearchProvider: 'exa',
   exaApiKey: '',
@@ -878,9 +881,10 @@ async function streamCompletion(payload, send, signal) {
 
 // ------------------------------------------------------------- handlers ---
 
-async function handleChat(req, res) {
-  // Larger limit than other routes: messages can carry images.
-  const body = await readJson(req, 64 * 1024 * 1024);
+// One reply: `body` is { messages, project, model, allowEdits, system, temperature, saveProgress },
+// where messages = an optional { role: 'summary' } message plus the live user/assistant messages.
+// Progress goes out through send(event); errors are thrown. Used by background runs (chats.js).
+async function chatCore(body, send, signal) {
   const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
   const project = typeof body.project === 'string' && body.project ? body.project : null;
   const allowCode = cfg.allowCodeReading && !!project;
@@ -895,10 +899,9 @@ async function handleChat(req, res) {
   const globalTarget = await mdTarget(null);
   const tools = buildTools({ project, allowEdits, allowCode });
   const ctx = { project, projectDir, projectTarget, globalTarget };
+  const ac = { signal };
 
-  const { send, ac, finish } = openEventStream(res);
-
-  try {
+  {
     const model = await resolveModel(body.model);
     try {
       if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
@@ -1008,14 +1011,6 @@ async function handleChat(req, res) {
       }
       send({ type: 'round_end' });
     }
-    send({ type: 'done' });
-  } catch (e) {
-    if (!ac.signal.aborted) {
-      log('chat error: ' + e.message);
-      send({ type: 'error', message: friendlyError(e) });
-    }
-  } finally {
-    finish();
   }
 }
 
@@ -1262,32 +1257,36 @@ async function handleAnthropic(req, res, route) {
   res.end();
 }
 
-function openEventStream(res) {
+// Server-sent events to one client. Closing the connection only stops this stream: background
+// runs keep going. Returns send(obj) and close(); onClose runs when the client goes away.
+function openEventStream(req, res, onClose) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
+  res.write(': connected\n\n');
   const send = (obj) => {
     if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
-  const ac = new AbortController();
-  res.on('close', () => {
-    if (!res.writableEnded) ac.abort();
-  });
   const ping = setInterval(() => res.write(': ping\n\n'), 15000);
-  const finish = () => {
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
     clearInterval(ping);
-    res.end();
+    if (!res.writableEnded) res.end();
+    if (onClose) onClose();
   };
-  return { send, ac, finish };
+  res.on('close', close);
+  return { send, close };
 }
 
 // Manual compaction (the site's Compact button, like Claude Code's /compact): summarizes the
-// whole chat so far, optionally focusing on what the user asks for.
-async function handleCompact(req, res) {
-  const body = await readJson(req, 64 * 1024 * 1024);
+// whole live part of the chat, optionally focusing on what the user asks for.
+// `body` is { messages, project, model, allowEdits, instructions, saveProgress }.
+async function compactCore(body, send, signal) {
   const project = typeof body.project === 'string' && body.project ? body.project : null;
   const projectTarget = project ? await mdTarget(project) : null;
   const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
@@ -1296,37 +1295,26 @@ async function handleCompact(req, res) {
   if (!history.length) throw httpError(400, previous ? 'Nothing new to compact since the last summary.' : 'This chat is empty.');
   const instructions = typeof body.instructions === 'string' ? body.instructions.trim().slice(0, 2000) : '';
 
-  const { send, ac, finish } = openEventStream(res);
+  const model = await resolveModel(body.model);
   try {
-    const model = await resolveModel(body.model);
-    try {
-      if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
-    } catch {}
-    const ctxLen = (await loadedContext(model)) || 16384;
-    const before = estimate([...(previous ? [{ content: previous }] : []), ...history]).tokens;
-    const summary = await summarize({
-      messages: history,
-      previous,
-      instructions,
-      model,
-      ctxLen,
-      signal: ac.signal,
-      onStatus: (text) => send({ type: 'status', text }),
-    });
-    const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
-    if (progressSaved) send({ type: 'claude_md_updated', scope: 'project', project });
-    const after = estimateMessage({ content: summary });
-    send({ type: 'compacted', summary, count: history.length, tokensBefore: before, tokensAfter: after, context: ctxLen, auto: false, progressSaved });
-    log(`Compacted ${history.length} messages on request: ~${before} -> ~${after} tokens${progressSaved ? ' (progress saved)' : ''}`);
-    send({ type: 'done' });
-  } catch (e) {
-    if (!ac.signal.aborted) {
-      log('compact error: ' + e.message);
-      send({ type: 'error', message: friendlyError(e) });
-    }
-  } finally {
-    finish();
-  }
+    if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
+  } catch {}
+  const ctxLen = (await loadedContext(model)) || 16384;
+  const before = estimate([...(previous ? [{ content: previous }] : []), ...history]).tokens;
+  const summary = await summarize({
+    messages: history,
+    previous,
+    instructions,
+    model,
+    ctxLen,
+    signal,
+    onStatus: (text) => send({ type: 'status', text }),
+  });
+  const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
+  if (progressSaved) send({ type: 'claude_md_updated', scope: 'project', project });
+  const after = estimateMessage({ content: summary });
+  send({ type: 'compacted', summary, count: history.length, tokensBefore: before, tokensAfter: after, context: ctxLen, auto: false, progressSaved });
+  log(`Compacted ${history.length} messages on request: ~${before} -> ~${after} tokens${progressSaved ? ' (progress saved)' : ''}`);
 }
 
 // Only short, non-content args go back to the browser (for the tool chips).
@@ -1491,7 +1479,7 @@ function applyCors(req, res) {
     res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Max-Age', '600');
 }
 
@@ -1520,6 +1508,12 @@ function checkAuth(req) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const chats = require('./chats')({
+  cfg, log, friendlyError, httpError, readJson, json, openEventStream, getProjectDir, chatCore, compactCore,
+});
+// Computers that run Claude Code sessions for the website (bridge/hosts.js, host/claude-remote.mjs).
+const hosts = require('./hosts')({ log, httpError, readJson, json, openEventStream, chats });
+
 const server = http.createServer(async (req, res) => {
   applyCors(req, res);
   if (req.method === 'OPTIONS') {
@@ -1542,14 +1536,13 @@ const server = http.createServer(async (req, res) => {
   failures.delete(addr);
 
   try {
+    // Chats stored on this PC and their background runs (bridge/chats.js).
+    if (await chats.handle(req, res, url)) return;
+    if (await hosts.handle(req, res, url)) return;
     const project = url.searchParams.get('project') || null;
     switch (route) {
       case 'GET /api/status':
         return await handleStatus(res);
-      case 'POST /api/chat':
-        return await handleChat(req, res);
-      case 'POST /api/compact':
-        return await handleCompact(req, res);
       // Claude-format API, so Claude Code can use the local model (see cli/claude-local.*).
       case 'POST /v1/messages':
       case 'POST /v1/messages/count_tokens':
@@ -1604,10 +1597,13 @@ const server = http.createServer(async (req, res) => {
 
 module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages };
 
-if (require.main === module) server.listen(cfg.port, cfg.host, () => {
+if (require.main === module) chats.init().then(() => server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);
   log(`LM Studio:        ${cfg.lmStudioUrl}`);
   log(`Global CLAUDE.md: ${cfg.claudeMdAbs}`);
   log(`Projects folder:  ${cfg.projectsRootAbs || '(not set)'}`);
   log(`Model edits to CLAUDE.md: ${cfg.allowModelEdits ? 'allowed' : 'disabled'}; code reading: ${cfg.allowCodeReading ? 'allowed' : 'disabled'}`);
-});
+  // This PC runs Claude Code sessions in its projects folder (turn off with "codeHost": false).
+  if (cfg.codeHost !== false && cfg.projectsRootAbs)
+    hosts.startLocalHost({ port: cfg.port, token: cfg.accessToken, root: cfg.projectsRootAbs, name: cfg.codeHostName || os.hostname() });
+}));

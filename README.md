@@ -1,6 +1,8 @@
 # Local LLM, from anywhere
 
-Chat with a model running in LM Studio on your PC from a website hosted on GitHub Pages. Every project folder gets its own `CLAUDE.md`. The model reads it on every message, can read the project's code (read-only), and can write or update the `CLAUDE.md` for you.
+Chat with a model running in LM Studio on your PC from a website hosted on GitHub Pages, and run Claude Code sessions on any of your computers from the same site.
+- **Chats and sessions live on the PC.** Every device shows the same list, and replies keep going when you close the page.
+- **Projects have memory.** Every project folder gets its own `CLAUDE.md`. The model reads it on every message, can read the project's code (read-only), and can write or update the `CLAUDE.md` for you.
 
 ```
 Phone / laptop browser
@@ -21,6 +23,11 @@ GitHub Pages only serves static files, so the page can't run the model itself. I
 |---|---|
 | `docs/index.html` | The website. GitHub Pages serves this folder. |
 | `bridge/server.js` | Local server: checks the access token, streams chat from LM Studio, manages projects and their CLAUDE.md files, keeps the model loaded with a context that fits your GPU. No npm install needed (Node 18+). |
+| `bridge/chats.js` | Chats stored on the PC, and replies that run in the background. |
+| `bridge/hosts.js` | Computers that run Claude Code sessions for the website, and those sessions. |
+| `bridge/chats/` | Your chats and sessions, one folder each (messages plus attached images). Never committed. |
+| `host/claude-remote.mjs` | The program that runs Claude Code sessions on a computer (uses the Claude Agent SDK). The PC starts its own copy. |
+| `cli/` | `claude-local` (Claude Code in a terminal with your model) and `claude-remote` (let the website run sessions on another computer). |
 | `bridge/config.json` | Your settings and **secret access token**. Created on first run; never committed. |
 | `bridge/backups/` | A copy of each CLAUDE.md is saved here before every change (last 50 per file). |
 | `start.ps1` | Starts LM Studio's server, loads the model, turns on Funnel, runs the bridge. |
@@ -60,7 +67,7 @@ If the model can see images (LM Studio lists it as a vision model), attach them 
 - **Video** is turned into still frames, about one per second, up to 8 frames, along with a note telling the model the timestamps. The model sees images, not motion, and there's no audio. The browser has to be able to play the file: MP4 and WebM work everywhere, while iPhone HEVC videos work in Safari.
 - Up to 16 images per message, counting each video frame.
 - Images use context: on Qwen3.8 27B, one token per 32×32 pixels, so a 1280×800 image is about 1,000 tokens and a video frame about 350. Earlier images are sent again with every message in the same chat.
-- The chat history saved in your browser keeps only small thumbnails. After reloading the page, the model is told an earlier image existed but can't see it anymore.
+- Attached images are saved on the PC with the chat (`bridge/chats/<id>/files/`), so the model can still see them after a reload or from another device.
 
 ## Context and compaction
 
@@ -78,6 +85,16 @@ Measured on the RTX 5070 Ti: a ~40k-token chat compacted to about 2k tokens in r
 Compaction keeps a long chat going, but it can't help a single message that's too big. A message that fills most of the context, like a 90k-token paste into 96k, leaves almost no room. Put big documents in the project folder instead; the model searches them and reads only the parts it needs.
 
 Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.6` compacts earlier.
+
+## Chats live on your PC
+
+Chats are stored by the bridge in `bridge/chats/`, not in the browser. The website is a window onto them.
+- **Same chats everywhere:** the list on the left (a ☰ drawer on phones) is the same on every device. Each chat has its own link (`…/#chat=<id>`), so a chat opened on your laptop can be continued on your phone.
+- **Replies run on the PC:** closing the tab, locking the phone or losing signal doesn't stop a reply. Open the chat again and it catches up, then keeps streaming. Two devices can watch the same reply live.
+- **Several chats per project:** **New chat** starts another one in the selected project. Picking a project shows its chats; open, rename or delete them from the list. Deleting moves the chat to `bridge/chats/.trash/`.
+- **One reply at a time:** the model runs one reply at a time. A message sent while another chat is replying waits ("Waiting for the model…") and starts after it.
+- **Status dots:** pulsing = replying, green = finished since you last looked, red = ended with an error, orange = a Claude Code session waiting for your approval. If you allow notifications, the site also tells you when a reply finishes or a session needs approval while the page is in the background.
+- **Stop:** works from any device. If the bridge restarts mid-reply, that reply is marked as stopped.
 
 ## Claude Code with your local model
 
@@ -140,6 +157,36 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 - **Harmless messages:** Claude Code may print `unrecognized_model` and a note about auto-mode billing because requests go through a gateway. Both can be ignored.
 
 **Security:** commands and file edits happen on the computer where you run `claude-local`, with Claude Code's usual permission prompts. The bridge only lends that computer the model. Anyone with your token can use the model through `/v1/messages`, but can't run anything on your PC.
+
+## Claude Code from the website
+
+The **Claude Code** button starts a Claude Code session on one of your computers. Your local model does the work, and you watch and steer it from the website, on any device. It's like Claude Code's own Remote Control, which only works with Anthropic's servers.
+
+- **How it runs:** a small program, `claude-remote`, runs Claude Code on that computer through the Claude Agent SDK. It connects **out** to your PC's bridge (through the Funnel address), so nothing needs to be opened on that computer. The PC starts its own copy with the bridge, for the folders in `Documents\Projects`.
+- **Approvals:** every command and file change shows up as a card: **Allow**, **Allow for this session** or **Deny**. "Allow file changes; ask before commands" skips the cards for edits.
+- **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
+- **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
+- **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.
+
+**Set up the PC** (once): `npm install --omit=optional` in the `host` folder, then restart the bridge. The bridge window shows `Claude Code host "<name>" connected`. To turn it off, set `"codeHost": false` in `bridge/config.json`; `"codeHostName"` changes the name shown.
+
+**Add another computer.** It needs [Node.js](https://nodejs.org) 18.14+, Claude Code, and `claude-local` set up once (that saves the bridge address and token). Then run `claude-remote` in the folder you want to allow:
+- **Windows:** copy `cli\claude-remote.ps1` and `cli\claude-remote.cmd` next to `claude-local` (e.g. `%USERPROFILE%\.local\bin`).
+- **macOS / Linux:**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/wesleyhuhuhu/Notepad/main/cli/claude-remote.sh -o ~/bin/claude-remote && chmod +x ~/bin/claude-remote
+  ```
+
+The first run downloads `claude-remote.mjs` and installs the SDK (skipping the SDK's own copy of Claude Code: your installed `claude` is used). It stays running until you close it.
+
+| Option | What it does |
+|---|---|
+| `--root <folder>` | A folder sessions may work in (repeat for more). Default: the current folder. The website offers each root and the folders directly inside it; anything else is refused. |
+| `--name <name>` | How the computer appears on the website. Default: its computer name. |
+| `--update` | Download the latest `claude-remote` first. |
+| `--bridge <url>`, `--token <token>` | Use these instead of claude-local's saved ones. |
+
+Measured with the PC's own host: a "create a file and run it" task took about 45 s including two approvals.
 
 ## Model loading
 
@@ -225,7 +272,9 @@ To stop public access entirely: `tailscale funnel --https=443 off`.
 
 ## Security
 
-- Anyone with the bridge URL **and** the token can use your model, read the code in your project folders (through the model), create project folders, and edit CLAUDE.md files. Keep the token private. To change it, delete `accessToken` from `bridge/config.json` and restart; a new one is generated.
+- Anyone with the bridge URL **and** the token can use your model, read your chats, read the code in your project folders (through the model), create project folders, and edit CLAUDE.md files.
+- With Claude Code sessions they could also **ask for commands to run** on your connected computers. Those still need an approval click on the website, but the token is what protects the website. Use a long random token and keep it private. To change it, delete `accessToken` from `bridge/config.json` and restart; a new one is generated. Then enter it again on each device and run `claude-local --setup` on other computers.
+- Sessions only work inside the folders each computer allows (`--root`), and `claude-remote` checks the folder again before starting.
 - The bridge only listens on `127.0.0.1`; the internet reaches it only through Funnel.
 - After 10 wrong tokens from one address, that address is locked out for 15 minutes.
 - The token is saved in your browser's local storage for the site. Use **Settings** to clear it on shared computers.
