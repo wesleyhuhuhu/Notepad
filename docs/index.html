@@ -295,7 +295,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     <div class="field">
       <label for="sUrl">Bridge URL</label>
       <input type="url" id="sUrl" placeholder="https://your-pc.your-tailnet.ts.net" autocomplete="off">
-      <div class="hint">The public address printed by <code>start.ps1</code> on your PC.</div>
+      <div class="hint">Your PC's address is filled in already. Change it only if that address changes.</div>
     </div>
     <div class="field">
       <label for="sToken">Access token</label>
@@ -329,6 +329,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     set(k, v) { try { localStorage.setItem('llm.' + k, JSON.stringify(v)); } catch {} },
   };
   const NEW_PROJECT = '__new__';
+  // Your PC's bridge (Tailscale Funnel). Used whenever this browser hasn't saved a different one.
+  const DEFAULT_BRIDGE = 'https://wesley.cloudforest-mackarel.ts.net';
+  // Addresses that no longer work (the tailnet was renamed) are replaced with the default.
+  const OLD_BRIDGES = ['https://wesley.tail67fd7a.ts.net'];
 
   // One-click setup: index.html#bridge=<url>&token=<token>
   function consumeHash() {
@@ -343,7 +347,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   consumeHash();
 
   let settings = {
-    bridgeUrl: store.get('bridgeUrl', ''),
+    bridgeUrl: (() => {
+      const saved = String(store.get('bridgeUrl', '') || '').replace(/\/+$/, '');
+      return !saved || OLD_BRIDGES.includes(saved) ? DEFAULT_BRIDGE : saved;
+    })(),
     token: store.get('token', ''),
     system: store.get('system', ''),
     theme: store.get('theme', ''),
@@ -391,7 +398,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   }
 
   async function refreshStatus() {
-    if (!settings.bridgeUrl || !settings.token) { setStatus('warn', 'Open Settings to connect'); return null; }
+    if (!settings.bridgeUrl || !settings.token) { setStatus('warn', 'Enter your access token in Settings'); return null; }
     try {
       const r = await api('/api/status');
       if (r.status === 401) { setStatus('bad', 'Wrong access token'); return null; }
@@ -1216,7 +1223,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
   // ---------------------------------------------------------- settings --
   function openSettings() {
-    $('sUrl').value = settings.bridgeUrl;
+    $('sUrl').value = settings.bridgeUrl || DEFAULT_BRIDGE;
     $('sToken').value = settings.token;
     $('sSystem').value = settings.system;
     $('sTheme').value = settings.theme;
