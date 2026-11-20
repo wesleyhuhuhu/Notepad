@@ -1600,6 +1600,57 @@ function ensureModelLoaded(model, onLoading) {
   return run;
 }
 
+// ------------------------------------------------------ LM Studio watch ---
+// Checks LM Studio every minute. If its server stops answering (LM Studio closed, crashed, or
+// was stopped along with the app that started it), the bridge starts the server again and
+// reloads the model that was loaded before, with the same context size.
+let lastLoaded = null; // { id, context } seen while LM Studio was up
+let lmDownSince = 0;
+let reviving = false;
+
+async function watchLmStudio() {
+  if (reviving) return;
+  try {
+    const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw new Error('LM Studio returned ' + r.status);
+    const loaded = ((await r.json()).data || []).find((m) => m.state === 'loaded' && m.type !== 'embeddings');
+    if (loaded) lastLoaded = { id: loaded.id, context: loaded.loaded_context_length || 0 };
+    if (lmDownSince) log('LM Studio is answering again.');
+    lmDownSince = 0;
+    return;
+  } catch (e) {
+    if (!lmDownSince) {
+      lmDownSince = Date.now();
+      log(`LM Studio isn't answering (${friendlyError(e)}). Checking again in a minute.`);
+      return; // one miss could be a hiccup
+    }
+  }
+  reviving = true;
+  try {
+    log('LM Studio has been down for over a minute: starting its server again.');
+    await lms(['server', 'start'], 120000);
+    const model = ((lastLoaded && lastLoaded.id) || cfg.model || '').replace(/:\d+$/, '');
+    // Stopping only the server keeps models loaded: never load a second copy.
+    let already = false;
+    try {
+      const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(10000) });
+      already = ((await r.json()).data || []).some((m) => m.state === 'loaded' && m.type !== 'embeddings');
+    } catch {}
+    if (already) log('The model is still loaded.');
+    else if (model) {
+      const ctx = cfg.contextLength || (lastLoaded && lastLoaded.context) || 0;
+      log(`Loading ${model}${ctx ? ` with context ${ctx}` : " with LM Studio's saved settings"}`);
+      await lms(['load', model, '-y', ...(ctx ? ['--context-length', String(ctx)] : [])]);
+    }
+    log('LM Studio is back.');
+    lmDownSince = 0;
+  } catch (e) {
+    log('Could not restart LM Studio: ' + e.message.slice(0, 300));
+  } finally {
+    reviving = false;
+  }
+}
+
 async function listModels() {
   // LM Studio's native REST API reports load state; fall back to the OpenAI list.
   try {
@@ -1818,4 +1869,9 @@ if (require.main === module) chats.init().then(() => hosts.adoptExisting()).then
   // This PC runs Claude Code sessions in its projects folder (turn off with "codeHost": false).
   if (cfg.codeHost !== false && cfg.projectsRootAbs)
     hosts.startLocalHost({ port: cfg.port, token: cfg.accessToken, root: cfg.projectsRootAbs, name: cfg.codeHostName || os.hostname() });
+  // Restart LM Studio if it stops (turn off with "watchLmStudio": false).
+  if (cfg.watchLmStudio !== false) {
+    watchLmStudio();
+    setInterval(watchLmStudio, 60000).unref();
+  }
 }));

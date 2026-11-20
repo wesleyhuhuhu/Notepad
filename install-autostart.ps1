@@ -22,11 +22,14 @@ if ($Remove) {
 $script = Join-Path $root 'autostart.ps1'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
   -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`"" -WorkingDirectory $root
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$atLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+# Every 5 minutes as well: while the bridge runs, these are skipped (IgnoreNew); if it has ended
+# for any reason, the next one starts it again.
+$every5 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
-  -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+  -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+Register-ScheduledTask -TaskName $name -Action $action -Trigger @($atLogon, $every5) -Settings $settings -Principal $principal `
   -Description 'Starts LM Studio''s server, Tailscale Funnel and the Local LLM bridge (autostart.ps1).' -Force | Out-Null
 Write-Host "Created the '$name' task: the bridge now starts when you log in." -ForegroundColor Green
 

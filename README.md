@@ -278,8 +278,11 @@ In `bridge/config.json`, change `"allowedOrigins": ["*"]` to `["https://<your-us
 ## Every day
 
 **Automatic (set up on this PC).** The **Local LLM bridge** task starts everything when you log in to Windows. It starts LM Studio's server and the model, turns on Funnel, and runs the bridge hidden, restarting it within about 10 seconds if it ever stops. It runs on its own, so closing other apps doesn't stop it.
+- **Recovers by itself:**
+  - **LM Studio:** the bridge checks it every minute. If its server is down for over a minute, the bridge starts it again and, if the model was unloaded, loads it again at the same context. Measured: back about a minute after it stopped. `"watchLmStudio": false` in `bridge/config.json` turns this off.
+  - **The bridge:** the task also runs every 5 minutes. While the bridge runs, those runs are skipped; if the bridge has ended for any reason, the next one starts it again. Measured: back 40 s after a full stop.
 - **Log:** `bridge\logs\bridge-<date>.log` has the bridge window's output, without the access token. Logs older than 14 days are deleted.
-- **Stop it:** `.\stop-bridge.ps1`. It starts again at the next login, or now with `Start-ScheduledTask -TaskName 'Local LLM bridge'`.
+- **Stop it:** `.\stop-bridge.ps1`. The task's 5-minute check starts it again; to keep it off, remove the task (below).
 - **Remove it:** `.\install-autostart.ps1 -Remove`. Running `.\install-autostart.ps1` sets it up again (no administrator rights needed).
 - **Context at login:** the task loads the model with LM Studio's saved settings (96k). If it's slow, load it at 90k: `lms load qwen3.8-27b-heretic-gsq-rco -y --context-length 90000`.
 

@@ -1,6 +1,6 @@
 <#
   stop-bridge.ps1 - stop the bridge started by the login task (and its Claude Code host).
-  It starts again at the next login, or with: Start-ScheduledTask -TaskName 'Local LLM bridge'
+  The task's 5-minute check starts it again; to keep it off: .\install-autostart.ps1 -Remove
 #>
 Stop-ScheduledTask -TaskName 'Local LLM bridge' -ErrorAction SilentlyContinue
 # The task's PowerShell window may leave the bridge running, so stop it by what it runs.
