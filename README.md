@@ -100,6 +100,7 @@ Chats are stored by the bridge in `bridge/chats/`, not in the browser. The websi
 - **One reply at a time:** the model runs one reply at a time. A message sent while another chat is replying waits ("Waiting for the model…") and starts after it.
 - **Status dots:** pulsing = replying, green = finished since you last looked, red = ended with an error, orange = a Claude Code session waiting for your approval. If you allow notifications, the site also tells you when a reply finishes or a session needs approval while the page is in the background.
 - **Stop:** works from any device. If the bridge restarts mid-reply, that reply is marked as stopped.
+- **Generation status:** while a reply or Claude Code session works, a line under it shows what the model is doing, like LM Studio: *Reading the prompt (~12k tokens) · 4 s*, then *Thinking · 512 tokens · 54 tok/s*, then *Writing*. A finished reply shows its stats: tokens (and how many were thinking), tokens per second, time to first token and prompt size. A low tokens/s (below ~40) usually means the model has spilled out of GPU memory (see Model loading).
 
 ## Claude Code with your local model
 

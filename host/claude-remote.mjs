@@ -237,6 +237,53 @@ async function startSession(chatId, cmd) {
   return s;
 }
 
+// Live progress for one model call: reading the prompt, then thinking or writing, with tokens/s.
+function genStart(s) {
+  genEnd(s);
+  s.g = { phase: 'reading', t0: Date.now(), tFirst: 0, tLast: 0, n: 0, thinking: 0, last: 0 };
+  genSend(s, true);
+  s.g.timer = setInterval(() => { if (s.g && !s.g.tFirst) genSend(s, true); }, 1000);
+}
+function genToken(s, thinking) {
+  if (!s.g) genStart(s);
+  const g = s.g;
+  g.tLast = Date.now();
+  if (!g.tFirst) g.tFirst = g.tLast;
+  g.n++;
+  if (thinking) g.thinking++;
+  g.phase = thinking ? 'thinking' : 'writing';
+  genSend(s);
+}
+function genSend(s, force) {
+  const g = s.g;
+  const now = Date.now();
+  if (!g || (!force && now - g.last < 500)) return;
+  g.last = now;
+  const secs = g.tFirst ? (now - g.tFirst) / 1000 : 0;
+  send(s.chatId, {
+    type: 'gen',
+    phase: g.phase,
+    tokens: g.n,
+    thinking: g.thinking,
+    tps: secs > 0.5 ? Math.round((g.n / secs) * 10) / 10 : 0,
+    waited: Math.round((now - g.t0) / 100) / 10,
+  });
+}
+function genEnd(s) {
+  const g = s.g;
+  if (!g) return;
+  clearInterval(g.timer);
+  s.g = null;
+  const t = s.turn || (s.turn = { tokens: 0, thinking: 0, genSeconds: 0, ttft: null, calls: 0 });
+  t.calls++;
+  t.tokens += g.n;
+  t.thinking += g.thinking;
+  if (g.tFirst) {
+    t.genSeconds += Math.max(0.001, (g.tLast - g.tFirst) / 1000);
+    if (t.ttft === null) t.ttft = (g.tFirst - g.t0) / 1000;
+  }
+}
+
 // Turns the SDK's messages into the small events the website shows.
 async function pump(s) {
   const id = s.chatId;
@@ -244,7 +291,10 @@ async function pump(s) {
     switch (m.type) {
       case 'system':
         if (m.subtype === 'init') send(id, { type: 'session', sessionId: m.session_id, model: m.model, permissionMode: m.permissionMode });
-        else if (m.subtype === 'status' && m.status) send(id, { type: 'status', text: m.status === 'requesting' ? '' : String(m.status) });
+        else if (m.subtype === 'status' && m.status === 'requesting') {
+          send(id, { type: 'status', text: '' });
+          genStart(s);
+        } else if (m.subtype === 'status' && m.status) send(id, { type: 'status', text: String(m.status) });
         else if (m.subtype === 'api_retry') send(id, { type: 'status', text: `Retrying the model (attempt ${m.attempt})…` });
         else if (m.subtype === 'compact_boundary') send(id, { type: 'status', text: 'Compacted the conversation to free up context.' });
         break;
@@ -255,9 +305,14 @@ async function pump(s) {
           s.deltas.add(s.current);
           send(id, { type: 'block_start', kind: e.content_block.type });
         } else if (e.type === 'content_block_delta' && e.delta) {
-          if (e.delta.type === 'text_delta') send(id, { type: 'delta', text: e.delta.text });
-          else if (e.delta.type === 'thinking_delta') send(id, { type: 'delta', text: e.delta.thinking });
-        }
+          if (e.delta.type === 'text_delta') {
+            send(id, { type: 'delta', text: e.delta.text });
+            genToken(s, false);
+          } else if (e.delta.type === 'thinking_delta') {
+            send(id, { type: 'delta', text: e.delta.thinking });
+            genToken(s, true);
+          } else if (e.delta.type === 'input_json_delta') genToken(s, false);
+        } else if (e.type === 'message_stop') genEnd(s);
         break;
       }
       case 'assistant': {
@@ -279,7 +334,12 @@ async function pump(s) {
               send(id, { type: 'tool_result', toolId: b.tool_use_id, ok: !b.is_error, result: short(toolResultText(b.content), 3000) });
         break;
       }
-      case 'result':
+      case 'result': {
+        genEnd(s);
+        const t = s.turn || { tokens: 0, thinking: 0, genSeconds: 0, ttft: null, calls: 0 };
+        s.turn = null;
+        const u = m.usage || {};
+        const tokens = u.output_tokens || t.tokens;
         send(id, {
           type: 'result',
           subtype: m.subtype,
@@ -287,8 +347,17 @@ async function pump(s) {
           durationMs: m.duration_ms,
           isError: !!m.is_error,
           text: typeof m.result === 'string' ? short(m.result, 500) : '',
+          stats: {
+            tokens,
+            thinking: t.thinking,
+            tps: t.genSeconds > 0 ? Math.round((tokens / t.genSeconds) * 10) / 10 : 0,
+            ttft: t.ttft,
+            calls: t.calls,
+            prompt: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) || undefined,
+          },
         });
         break;
+      }
     }
   }
 }

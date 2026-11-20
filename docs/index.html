@@ -132,6 +132,9 @@ details.reasoning div { white-space: pre-wrap; border-left: 2px solid var(--bord
 .linkbtn:disabled { color: var(--muted); }
 dialog .hint-top { font-size: 13.5px; color: var(--muted); margin: -6px 0 14px; }
 .notice { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 8px; }
+.gen { color: var(--muted); font-size: 12.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+.gen::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; flex: none; }
+.stats { color: var(--muted); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--muted); }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -841,7 +844,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         if (m) {
           if (ev.state === 'queued') m.notice = 'Waiting for the model to finish another reply…';
           else if (ev.state === 'running' && m.notice && m.notice.startsWith('Waiting')) m.notice = '';
-          if (!active) m.notice = '';
+          if (!active) { m.notice = ''; m.gen = null; }
           repaint(m);
         }
         if (!active) {
@@ -878,7 +881,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       }
       case 'usage': {
         const m = byId(ev.id);
-        if (m) m.usage = ev.usage;
+        if (m) { m.usage = ev.usage; if (ev.stats) m.stats = ev.stats; }
         updateMeter();
         return;
       }
@@ -991,14 +994,14 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       el.textContent = '';
       v = el._view = {
         notice: div('notice'), details: document.createElement('details'), summary: document.createElement('summary'),
-        rbox: div(), tools: div('tools'), body: div('body'), err: div('err'),
+        rbox: div(), tools: div('tools'), body: div('body'), err: div('err'), gen: div('gen'), stats: div('stats'),
         reason: null, content: null, toolsKey: null,
       };
       v.details.className = 'reasoning';
       v.details.append(v.summary, v.rbox);
       // Remember the user's choice so streaming doesn't keep re-opening or closing it.
       v.summary.addEventListener('click', () => { m.reasoningOpen = !v.details.open; });
-      el.append(v.notice, v.details, v.tools, v.body, v.err);
+      el.append(v.notice, v.gen, v.details, v.tools, v.body, v.err, v.stats);
     }
     const { reasoning: inlineR, content } = splitThink(m.content || '');
     const reasoning = [m.reasoning || '', inlineR].filter(Boolean).join('\n').trim();
@@ -1044,6 +1047,13 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
     v.err.hidden = !m.error;
     if (m.error) v.err.textContent = m.error;
+
+    const live = streaming && m.gen ? genText(m.gen) : '';
+    v.gen.hidden = !live;
+    if (live) v.gen.textContent = live;
+    const st = streaming ? '' : statsText(m.stats);
+    v.stats.hidden = !st;
+    if (st) v.stats.textContent = st;
   }
 
   function render() {
@@ -1093,6 +1103,25 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   }
 
   const elOf = new WeakMap(); // message object -> its element
+  const num = (n) => Math.round(n || 0).toLocaleString();
+  // Live status while the model works, like LM Studio's: reading the prompt, thinking, writing.
+  function genText(g) {
+    if (!g) return '';
+    if (g.phase === 'reading') return `Reading the prompt${g.prompt ? ` (~${kTok(g.prompt)} tokens)` : ''} · ${Math.round(g.waited || 0)} s`;
+    const rate = g.tps ? ` · ${g.tps.toFixed(1)} tok/s` : '';
+    if (g.phase === 'thinking') return `Thinking · ${num(g.tokens)} tokens${rate}`;
+    return `Writing · ${num(g.tokens)} tokens${g.thinking ? ` (${num(g.thinking)} thinking)` : ''}${rate}`;
+  }
+  // Stats under a finished reply.
+  function statsText(st) {
+    if (!st || !st.tokens) return '';
+    const parts = [`${num(st.tokens)} tokens${st.thinking ? ` (${num(st.thinking)} thinking)` : ''}`];
+    if (st.tps) parts.push(`${st.tps.toFixed(1)} tok/s`);
+    if (st.ttft != null) parts.push(`${st.ttft.toFixed(1)} s to first token`);
+    if (st.prompt) parts.push(`${num(st.prompt)} prompt tokens`);
+    if (st.rounds > 1) parts.push(`${st.rounds} steps`);
+    return parts.join(' · ');
+  }
   const kTok = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(Math.round(n || 0)));
 
   function msgEl(m, streaming) {
@@ -1592,7 +1621,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         if (b && b.state === 'pending') { b.state = ev.allow ? 'allowed' : 'denied'; if (ev.always) b.always = true; }
         break;
       }
-      case 'result': m.result = ev.result; m.notice = ''; break;
+      case 'result': m.result = ev.result; m.notice = ''; m.gen = null; break;
+      case 'gen': m.gen = ev; break;
       case 'status': m.notice = ev.text; break;
       case 'error': if (ev.message) m.error = ev.message; break;
     }
@@ -1641,7 +1671,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     }
     const blocks = m.blocks || [];
     v.notice.hidden = !streaming;
-    if (streaming) v.notice.textContent = m.notice || (blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : 'Working…');
+    if (streaming) v.notice.textContent = m.notice || (blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : genText(m.gen) || 'Working…');
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
       let it = v.items[i];
@@ -1703,7 +1733,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     if (m.error) v.err.textContent = m.error;
     const r = m.result;
     v.foot.hidden = !r;
-    if (r) v.foot.textContent = `${r.stopped ? 'Stopped' : r.isError ? 'Ended with an error' : 'Done'} · ${r.turns} step${r.turns === 1 ? '' : 's'} · ${Math.round((r.durationMs || 0) / 1000)} s`;
+    if (r) v.foot.textContent = [`${r.stopped ? 'Stopped' : r.isError ? 'Ended with an error' : 'Done'} · ${r.turns} step${r.turns === 1 ? '' : 's'} · ${Math.round((r.durationMs || 0) / 1000)} s`, statsText(r.stats && { ...r.stats, prompt: 0 })].filter(Boolean).join(' · ');
   }
 
   // ---- new session dialog
@@ -1827,6 +1857,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       }
       case 'claude_md_updated': mdUpdated(ev); break;
       case 'status': a.notice = ev.text; break;
+      case 'gen': a.gen = ev; break;
       case 'error': if (ev.message) a.error = ev.message; break;
     }
   }

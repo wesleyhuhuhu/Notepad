@@ -189,9 +189,12 @@ module.exports = function createHosts(d) {
         chats.listChanged(chat);
         return;
       }
+      case 'gen':
+        chats.live(chat, { type: 'gen', id: turn.id, phase: ev.phase, tokens: ev.tokens, thinking: ev.thinking, tps: ev.tps, waited: ev.waited });
+        return;
       case 'result': {
         const stopping = !!(chat.run && chat.run.stopping);
-        turn.result = { subtype: ev.subtype, turns: ev.turns, durationMs: ev.durationMs, isError: !!ev.isError, stopped: stopping };
+        turn.result = { subtype: ev.subtype, turns: ev.turns, durationMs: ev.durationMs, isError: !!ev.isError, stopped: stopping, stats: ev.stats || undefined };
         turn.notice = '';
         Object.assign(out, { result: turn.result });
         chats.emit(chat, out);

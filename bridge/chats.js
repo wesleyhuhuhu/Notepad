@@ -266,7 +266,15 @@ module.exports = function createChats(d) {
           if (!firstPrompt) firstPrompt = ev.prompt;
           const peak = Math.max((a.usage && a.usage.peak) || 0, ev.prompt + ev.completion);
           a.usage = { used: firstPrompt + Math.max(0, ev.completion - ev.reasoning), peak, context: ev.context };
-          return emit(chat, { type: 'usage', id: a.id, usage: a.usage });
+          // Like LM Studio's stats: tokens, tokens per second, time to first token, prompt size.
+          const st = a.stats || { tokens: 0, thinking: 0, genSeconds: 0, ttft: ev.ttft, prompt: ev.prompt, rounds: 0 };
+          st.tokens += ev.completion || 0;
+          st.thinking += ev.reasoning || 0;
+          st.genSeconds += ev.genSeconds || 0;
+          st.rounds++;
+          st.tps = st.genSeconds > 0 ? Math.round((st.tokens / st.genSeconds) * 10) / 10 : 0;
+          a.stats = st;
+          return emit(chat, { type: 'usage', id: a.id, usage: a.usage, stats: a.stats });
         }
         case 'token':
           a.content += ev.text;
@@ -291,6 +299,10 @@ module.exports = function createChats(d) {
         case 'status':
           a.notice = ev.text;
           break;
+        case 'gen':
+          // Live progress isn't saved; it goes to the devices that are watching.
+          for (const send of watchers.get(chat.id) || []) send({ ...ev, id: a.id });
+          return;
       }
       emit(chat, { ...ev, id: ev.type === 'claude_md_updated' ? undefined : a.id, toolId: ev.id });
     };
@@ -597,5 +609,7 @@ module.exports = function createChats(d) {
   return {
     init, handle, chats, emit, listChanged, broadcastList, summaryOf, newId, saveNow, saveSoon, setRun, endRun, titleFrom,
     setCode: (c) => { code = c; },
+    // Sends an event to the devices watching a chat without storing it (live progress).
+    live: (chat, ev) => { for (const send of watchers.get(chat.id) || []) send(ev); },
   };
 };

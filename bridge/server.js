@@ -862,7 +862,35 @@ async function saveProgress(target, summary) {
 
 // ------------------------------------------------------- LM Studio call ---
 
-async function streamCompletion(payload, send, signal) {
+// Also sends { type: 'gen' } progress about twice a second: phase reading (before the first token,
+// with the prompt's estimated size), thinking or writing, tokens so far and tokens per second.
+// Returns timing { ttft, genSeconds } with the result.
+async function streamCompletion(payload, send, signal, promptEstimate) {
+  const t0 = Date.now();
+  let tFirst = 0;
+  let tLast = 0;
+  let thinkingN = 0;
+  let writingN = 0;
+  let lastGen = 0;
+  const gen = (phase, force) => {
+    const now = Date.now();
+    if (!force && now - lastGen < 500) return;
+    lastGen = now;
+    const n = thinkingN + writingN;
+    const secs = tFirst ? (now - tFirst) / 1000 : 0;
+    send({
+      type: 'gen',
+      phase,
+      tokens: n,
+      thinking: thinkingN,
+      tps: secs > 0.5 ? Math.round((n / secs) * 10) / 10 : 0,
+      waited: Math.round((now - t0) / 100) / 10,
+      prompt: promptEstimate || undefined,
+    });
+  };
+  gen('reading', true);
+  const readingTimer = setInterval(() => { if (!tFirst) gen('reading', true); }, 1000);
+  try {
   const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -897,10 +925,20 @@ async function streamCompletion(payload, send, signal) {
     if (!ch) return;
     const d = ch.delta || {};
     const reasoning = d.reasoning_content || d.reasoning;
-    if (reasoning) send({ type: 'reasoning', text: reasoning });
+    if (reasoning || d.content) {
+      tLast = Date.now();
+      if (!tFirst) tFirst = tLast;
+    }
+    if (reasoning) {
+      thinkingN++;
+      send({ type: 'reasoning', text: reasoning });
+      gen('thinking');
+    }
     if (d.content) {
       content += d.content;
+      writingN++;
       send({ type: 'token', text: d.content });
+      gen('writing');
     }
     if (Array.isArray(d.tool_calls)) {
       for (const t of d.tool_calls) {
@@ -924,7 +962,14 @@ async function streamCompletion(payload, send, signal) {
   }
   if (buf) handleLine(buf);
 
-  return { content, usage, toolCalls: calls.filter((c) => c && c.name) };
+  const timing = {
+    ttft: tFirst ? (tFirst - t0) / 1000 : null,
+    genSeconds: tFirst ? Math.max(0.001, (tLast - tFirst) / 1000) : 0,
+  };
+  return { content, usage, toolCalls: calls.filter((c) => c && c.name), timing };
+  } finally {
+    clearInterval(readingTimer);
+  }
 }
 
 // ------------------------------------------------------------- handlers ---
@@ -1004,15 +1049,16 @@ async function chatCore(body, send, signal) {
     for (let round = 0; round <= cfg.maxToolRounds; round++) {
       const useTools = round < cfg.maxToolRounds;
       const roundEst = round === 0 ? estimate(messages, useTools ? tools : null) : null;
-      const { content, toolCalls, usage } = await streamCompletion(
+      const { content, toolCalls, usage, timing } = await streamCompletion(
         { model, messages, ...(useTools ? { tools } : {}), ...extra },
         send,
-        ac.signal
+        ac.signal,
+        estimate(messages, useTools ? tools : null).tokens
       );
       if (usage) {
         if (roundEst) calibrate(roundEst, usage.prompt_tokens);
         const reasoning = (usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens) || 0;
-        send({ type: 'usage', prompt: usage.prompt_tokens, completion: usage.completion_tokens, reasoning, context: ctxLen });
+        send({ type: 'usage', prompt: usage.prompt_tokens, completion: usage.completion_tokens, reasoning, context: ctxLen, ttft: timing.ttft, genSeconds: timing.genSeconds });
       }
       if (!toolCalls.length) break;
 
