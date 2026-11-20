@@ -49,6 +49,11 @@ header h1 { font-size: 16px; margin: 0; font-weight: 600; white-space: nowrap; }
   min-width: 0; max-width: 240px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); font-weight: 600;
 }
+.where {
+  min-width: 0; max-width: 340px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.where .host { font-weight: 400; color: var(--muted); }
 .status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-width: 0; flex: 1; }
 .status span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -249,7 +254,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; row-gap: 8px; }
   header h1 { display: none; }
-  #project { flex: 1 1 100%; max-width: none; }
+  #project, .where { flex: 1 1 100%; max-width: none; }
   .status { order: 2; flex: 1 1 0; }
   header .actions { order: 3; }
   header .actions button { padding: 6px 9px; }
@@ -261,6 +266,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   <button id="btnSide" title="Chats" aria-label="Show chats">☰</button>
   <h1>Local LLM</h1>
   <select id="project" title="Project"><option value="">No project</option></select>
+  <span id="where" class="where" hidden></span>
   <div class="status" title="Bridge status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
   <div class="actions">
     <button id="btnMd" title="View and edit CLAUDE.md">CLAUDE.md</button>
@@ -736,7 +742,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     store.set('chat', c.id);
     setChatHash(c.id);
     markSeen(c);
-    if ((c.project || '') !== project) switchProject(c.project || '', { keepChat: true });
+    if (c.kind !== 'code' && (c.project || '') !== project) switchProject(c.project || '', { keepChat: true });
     render();
     updateSend();
     renderChatList();
@@ -1489,8 +1495,34 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
   // ------------------------------------------------------ Claude Code --
   function updateMode() {
-    document.body.classList.toggle('code-mode', isCode());
-    $('input').placeholder = isCode() ? 'Tell Claude Code what to do…' : 'Message your local model…';
+    const code = isCode();
+    document.body.classList.toggle('code-mode', code);
+    $('input').placeholder = code ? 'Tell Claude Code what to do…' : 'Message your local model…';
+    // In a Claude Code session the header shows its folder instead of the project menu.
+    $('project').hidden = code;
+    $('where').hidden = !code;
+    if (code) {
+      const h = hostOf(chat.host);
+      $('where').textContent = '📁 ' + baseName(chat.cwd) + ' ';
+      const hn = document.createElement('span');
+      hn.className = 'host';
+      hn.textContent = '· ' + ((h && h.name) || chat.hostName || chat.host);
+      $('where').appendChild(hn);
+      $('where').title = chat.cwd;
+    }
+    updateMdControls();
+    if ($('mdpanel').classList.contains('open')) loadMd();
+  }
+
+  // The project a Claude Code session's folder is, when it's one of this PC's project folders.
+  function codeProject() {
+    if (!chat || chat.kind !== 'code' || !status || !status.projectsRoot) return '';
+    const h = hostOf(chat.host);
+    if (!h || !h.managed) return '';
+    const norm = (p) => String(p).replace(/[\\/]+$/, '').toLowerCase();
+    const parent = String(chat.cwd).replace(/[\\/][^\\/]+[\\/]*$/, '');
+    const name = baseName(chat.cwd);
+    return norm(parent) === norm(status.projectsRoot) && projects.some((p) => p.name === name) ? name : '';
   }
 
   const hostOf = (id) => hostList.find((h) => h.id === id);
@@ -1517,6 +1549,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
   function hostsChanged() {
     if (isCode()) {
+      updateMode();
       const old = $('list').querySelector('.codebar');
       if (old) old.replaceWith(codeBar());
     }
@@ -1752,6 +1785,12 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   }
 
   function generateMd() {
+    if (isCode()) {
+      send('Look through the files in this folder (README, config and main source files) and write or update CLAUDE.md here. ' +
+        'Sections: Overview, Tech stack, Structure, Commands (build/run/test), Conventions, Notes. Be concise and only include what the files show. ' +
+        'Keep anything useful that is already in it.');
+      return;
+    }
     if (!project) return;
     if (!$('allowEdits').checked) { $('allowEdits').checked = true; store.set('allowEdits', true); }
     send('Look through this project\'s files (README, config and main source files) and write its CLAUDE.md with write_claude_md. ' +
@@ -1761,14 +1800,17 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
   // --------------------------------------------------------- CLAUDE.md --
   let mdLoaded = '';
-  const mdTargetProject = () => (mdScope === 'project' ? project : '');
+  // The project whose CLAUDE.md the panel shows: the selected one, or a Claude Code session's folder.
+  const mdProj = () => (isCode() ? codeProject() : project);
+  const mdTargetProject = () => (mdScope === 'project' ? mdProj() : '');
 
   function updateMdControls() {
-    const hasProject = !!project;
+    const p = mdProj();
+    const hasProject = !!p;
     if (!hasProject) mdScope = 'global';
     $('segProject').disabled = !hasProject;
-    $('segProject').textContent = hasProject ? project : 'Project';
-    $('segProject').title = hasProject ? `CLAUDE.md for ${project}` : 'Pick a project first';
+    $('segProject').textContent = hasProject ? p : 'Project';
+    $('segProject').title = hasProject ? `CLAUDE.md for ${p}` : isCode() ? "This session's folder isn't a project on this PC" : 'Pick a project first';
     $('segProject').setAttribute('aria-pressed', String(mdScope === 'project'));
     $('segGlobal').setAttribute('aria-pressed', String(mdScope === 'global'));
     $('mdGenerate').style.display = mdScope === 'project' && hasProject && status && status.allowCodeReading ? '' : 'none';
@@ -1809,7 +1851,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       mdLoaded = content;
       $('mdNote').textContent = 'Saved. The previous version was backed up on your PC.';
       if (mdScope === 'project') {
-        const p = projects.find((x) => x.name === project);
+        const p = projects.find((x) => x.name === mdProj());
         if (p && !p.hasClaudeMd) { p.hasClaudeMd = true; fillProjects(); }
       }
     } catch (e) {
@@ -1894,7 +1936,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   $('npName').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); createProject(); } });
   $('btnMd').addEventListener('click', () => {
     if ($('mdpanel').classList.contains('open')) $('mdpanel').classList.remove('open');
-    else openPanel(project ? 'project' : 'global');
+    else openPanel(mdProj() ? 'project' : 'global');
   });
   $('segProject').addEventListener('click', () => { mdScope = 'project'; updateMdControls(); mdLoaded = $('mdtext').value; loadMd(); });
   $('segGlobal').addEventListener('click', () => { mdScope = 'global'; updateMdControls(); mdLoaded = $('mdtext').value; loadMd(); });
