@@ -206,7 +206,11 @@ async function startSession(chatId, cmd) {
       model,
       pathToClaudeCodeExecutable: CLAUDE,
       tools: ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write', 'WebFetch', 'WebSearch'],
-      permissionMode: cmd.permissionMode === 'acceptEdits' ? 'acceptEdits' : 'default',
+      // default: ask before file changes and commands. acceptEdits: file changes in the folder are
+      // automatic. allowAll: commands too. Web searches and page reads never ask. Anything outside
+      // the session's folder still asks.
+      permissionMode: cmd.permissionMode === 'acceptEdits' || cmd.permissionMode === 'allowAll' ? 'acceptEdits' : 'default',
+      allowedTools: ['WebSearch', 'WebFetch', ...(cmd.permissionMode === 'allowAll' ? ['Bash'] : [])],
       includePartialMessages: true,
       ...(cmd.resume ? { resume: cmd.resume } : {}),
       canUseTool: (toolName, toolInput, o) =>

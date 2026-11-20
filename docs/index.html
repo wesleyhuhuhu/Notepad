@@ -330,7 +330,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 <dialog id="codeDlg">
   <form method="dialog">
     <h2>New Claude Code session</h2>
-    <p class="hint-top">Claude Code runs on the computer you pick, with your local model. It asks here before it runs a command or changes a file, and keeps working if you close this page.</p>
+    <p class="hint-top">Claude Code runs on the computer you pick, with your local model, and keeps working if you close this page. Web searches never need approval; changes outside the session's folder always do.</p>
     <div class="field">
       <label for="cdHost">Computer</label>
       <select id="cdHost"></select>
@@ -345,6 +345,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       <select id="cdMode">
         <option value="default">Ask before every file change and command</option>
         <option value="acceptEdits">Allow file changes; ask before commands</option>
+        <option value="allowAll">Allow file changes and commands (no approvals)</option>
       </select>
     </div>
     <div class="row">
@@ -1547,7 +1548,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     where.appendChild(Object.assign(document.createElement('code'), { textContent: chat.cwd }));
     bar.appendChild(where);
     const mode = document.createElement('span');
-    mode.textContent = chat.permissionMode === 'acceptEdits' ? '· file changes allowed, commands ask' : '· asks before every change';
+    mode.textContent = { acceptEdits: '· file changes allowed, commands ask', allowAll: '· file changes and commands allowed' }[chat.permissionMode] || '· asks before every change';
     bar.appendChild(mode);
     if (!h || !h.online) {
       const off = document.createElement('span');

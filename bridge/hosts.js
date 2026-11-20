@@ -54,7 +54,7 @@ module.exports = function createHosts(d) {
     if (project && (await d.ensureProjectMd(project))) log(`Created a starter CLAUDE.md for project "${project}"`);
     return {
       title: `${path.basename(cwd) || cwd} · ${h.name}`,
-      fields: { host: h.id, hostName: h.name, cwd, project, permissionMode: body.permissionMode === 'acceptEdits' ? 'acceptEdits' : 'default' },
+      fields: { host: h.id, hostName: h.name, cwd, project, permissionMode: ['acceptEdits', 'allowAll'].includes(body.permissionMode) ? body.permissionMode : 'default' },
     };
   }
 

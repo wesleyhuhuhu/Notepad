@@ -174,7 +174,11 @@ The **Claude Code** button starts a Claude Code session on one of your computers
   - Claude Code reads the project's CLAUDE.md and the global one. If the project has none, a starter CLAUDE.md is created when the session starts, for Claude Code to fill in when you ask.
   - In the dialog, the selected project's folder is picked for you, and **+ New project…** creates one (folder plus starter CLAUDE.md).
   - Sessions in other folders, or on other computers, are listed under **Claude Code sessions**.
-- **Approvals:** every command and file change shows up as a card: **Allow**, **Allow for this session** or **Deny**. "Allow file changes; ask before commands" skips the cards for edits.
+- **Approvals:** each session has one of three modes, picked when you start it:
+  - **Ask before every file change and command** (default): each one shows a card with **Allow**, **Allow for this session** or **Deny**.
+  - **Allow file changes; ask before commands.**
+  - **Allow file changes and commands (no approvals):** it works on its own. Use it in folders you don't mind it changing.
+  - In every mode, web searches and page reads never ask, reading files never asks, and anything outside the session's folder still asks.
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.
