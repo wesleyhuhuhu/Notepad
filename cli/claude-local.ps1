@@ -6,10 +6,10 @@
   everything is set only for this one Claude Code session.
 
   Usage (anything the script doesn't recognise is passed to claude as is):
-    claude-local                         interactive Claude Code, core coding tools only
+    claude-local                         interactive Claude Code, core coding tools + web tools
     claude-local -p "fix the failing test"
     claude-local --continue
-    claude-local --all-tools             every Claude Code tool (~16k tokens of setup instead of ~4.4k)
+    claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
     claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
     claude-local --max-output 12000      longest reply, thinking included (default 8192)
     claude-local --setup                 change the saved address or token
@@ -21,7 +21,7 @@
 $ErrorActionPreference = 'Stop'
 $cfgDir = Join-Path $env:APPDATA 'claude-local'
 $cfgFile = Join-Path $cfgDir 'config.json'
-$coreTools = 'Bash,Edit,Glob,Grep,Read,Write'
+$coreTools = 'Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch'
 
 # --- our own options (double-dash, so they never clash with claude's short flags) ---
 $setup = $false; $allTools = $false; $context = 0; $maxOutput = 8192

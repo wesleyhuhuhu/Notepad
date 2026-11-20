@@ -7,10 +7,10 @@
 # changed: everything is set only for this one Claude Code session.
 #
 # Usage (anything the script doesn't recognise is passed to claude as is):
-#   claude-local                         interactive Claude Code, core coding tools only
+#   claude-local                         interactive Claude Code, core coding tools + web tools
 #   claude-local -p "fix the failing test"
 #   claude-local --continue
-#   claude-local --all-tools             every Claude Code tool (~16k tokens of setup instead of ~4.4k)
+#   claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
 #   claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
 #   claude-local --max-output 12000      longest reply, thinking included (default 8192)
 #   claude-local --setup                 change the saved address or token
@@ -20,7 +20,7 @@ set -euo pipefail
 
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-local"
 CFG_FILE="$CFG_DIR/config"
-CORE_TOOLS="Bash,Edit,Glob,Grep,Read,Write"
+CORE_TOOLS="Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch"
 
 setup=0; all_tools=0; context=0; max_output=8192; pass=()
 while [ $# -gt 0 ]; do

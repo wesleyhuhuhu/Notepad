@@ -45,6 +45,12 @@ const DEFAULTS = {
   // summarized (like Claude Code's auto-compact) so the chat can keep going.
   autoCompact: true,
   compactAt: 0.7,
+  // Web search for Claude Code's WebSearch tool (see "web search" below). The key stays on this PC.
+  webSearchProvider: 'exa',
+  exaApiKey: '',
+  webSearchType: 'auto', // Exa: 'auto' (best results, $7/1k) or 'lite' (cheaper, $4/1k)
+  webSearchResults: 8, // results per search (Exa's base price covers up to 10)
+  webSearchChars: 1500, // excerpt length per result
   accessToken: '',
 };
 
@@ -1053,6 +1059,146 @@ function foldSystemMessages(messages) {
   return out;
 }
 
+// ------------------------------------------------------------ web search ---
+// Claude Code's WebSearch tool doesn't search by itself: it sends a small request carrying
+// Anthropic's `web_search` server tool and expects the API to run the search. LM Studio can't,
+// so the bridge answers those requests itself, using a search service, in the same format.
+
+const isWebSearchTool = (t) => !!t && typeof t.type === 'string' && t.type.startsWith('web_search');
+
+function webSearchQuery(body) {
+  const last = [...(body.messages || [])].reverse().find((m) => m && m.role === 'user');
+  const text = last ? systemTextOf(last).trim() : '';
+  const m = text.match(/web search for the query:\s*([\s\S]+)$/i);
+  return (m ? m[1] : text).trim();
+}
+
+const searchError = (code, message) => Object.assign(new Error(message), { code });
+
+// Each provider takes { query, allowed, blocked, signal } and returns
+// { results: [{ title, url, published, text }], cost }.
+const searchProviders = {
+  async exa({ query, allowed, blocked, signal }) {
+    const key = cfg.exaApiKey || process.env.EXA_API_KEY || '';
+    if (!key) throw searchError('unavailable', 'Web search is not set up: add your Exa API key as "exaApiKey" in bridge/config.json and restart the bridge.');
+    const r = await fetch('https://api.exa.ai/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body: JSON.stringify({
+        query,
+        type: cfg.webSearchType,
+        numResults: cfg.webSearchResults,
+        ...(allowed.length ? { includeDomains: allowed } : {}),
+        ...(blocked.length ? { excludeDomains: blocked } : {}),
+        contents: { highlights: { maxCharacters: cfg.webSearchChars } },
+      }),
+      signal,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const why = data.error || `HTTP ${r.status}`;
+      if (r.status === 401) throw searchError('unavailable', `Exa rejected the API key (${why}). Check "exaApiKey" in bridge/config.json.`);
+      if (r.status === 402) throw searchError('unavailable', `Exa says the account is out of credits (${why}).`);
+      if (r.status === 429) throw searchError('too_many_requests', `Exa rate limit reached (${why}). Try again shortly.`);
+      if (r.status === 400) throw searchError('invalid_input', `Exa rejected the search (${why}).`);
+      throw searchError('unavailable', `Exa search failed (${why}).`);
+    }
+    const results = (data.results || []).map((x) => ({
+      title: x.title || x.url,
+      url: x.url,
+      published: x.publishedDate ? String(x.publishedDate).slice(0, 10) : '',
+      text: (Array.isArray(x.highlights) ? x.highlights.join('\n…\n') : x.text || x.summary || '').trim(),
+    }));
+    return { results, cost: data.costDollars && data.costDollars.total };
+  },
+};
+
+function formatSearchResults(query, results) {
+  if (!results.length) return `No web results found for "${query}".`;
+  const parts = results.map((r, i) =>
+    [`[${i + 1}] ${r.title}`, `URL: ${r.url}`, r.published ? `Published: ${r.published}` : '', r.text].filter(Boolean).join('\n')
+  );
+  return `Web results for "${query}" (excerpts from each page; use WebFetch on a URL to read the whole page):\n\n${parts.join('\n\n')}`;
+}
+
+async function handleWebSearch(req, res, body, tool) {
+  const query = webSearchQuery(body);
+  const id = 'srvtoolu_' + crypto.randomBytes(12).toString('hex');
+  const provider = searchProviders[cfg.webSearchProvider];
+  const ac = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) ac.abort();
+  });
+  let resultContent;
+  let text;
+  let count = 0;
+  const t0 = Date.now();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, 45000);
+  try {
+    if (!provider) throw searchError('unavailable', `Unknown webSearchProvider "${cfg.webSearchProvider}" in bridge/config.json.`);
+    if (!query) throw searchError('invalid_input', 'The search query was empty.');
+    if (query.length > 2000) throw searchError('query_too_long', 'The search query is too long.');
+    const strip = (d) => String(d).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const { results, cost } = await provider({
+      query,
+      allowed: (tool.allowed_domains || []).map(strip),
+      blocked: (tool.blocked_domains || []).map(strip),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    count = 1;
+    resultContent = results.map((r) => ({
+      type: 'web_search_result',
+      url: r.url,
+      title: r.title,
+      encrypted_content: Buffer.from(r.text || '').toString('base64'),
+      page_age: r.published || null,
+    }));
+    text = formatSearchResults(query, results);
+    log(`Web search (${cfg.webSearchProvider}): "${query.slice(0, 80)}" -> ${results.length} results in ${((Date.now() - t0) / 1000).toFixed(1)}s${cost != null ? `, $${Number(cost).toFixed(4)}` : ''}`);
+  } catch (e) {
+    clearTimeout(timer);
+    if (ac.signal.aborted && !timedOut) return; // Claude Code hung up
+    const code = e.code || 'unavailable';
+    const message = timedOut ? 'The search service took too long to answer (45 s).' : e.message;
+    resultContent = { type: 'web_search_tool_result_error', error_code: code };
+    text = `Web search failed: ${message}`;
+    log(`Web search (${cfg.webSearchProvider}) failed: ${message}`);
+  }
+
+  const content = [
+    { type: 'server_tool_use', id, name: 'web_search', input: { query } },
+    { type: 'web_search_tool_result', tool_use_id: id, content: resultContent },
+    { type: 'text', text },
+  ];
+  const usage = {
+    input_tokens: Math.round(anthropicChars(body) * tokensPerChar),
+    output_tokens: Math.round(text.length * tokensPerChar),
+    server_tool_use: { web_search_requests: count },
+  };
+  const message = { id: 'msg_' + crypto.randomBytes(12).toString('hex'), type: 'message', role: 'assistant', model: body.model, content, stop_reason: 'end_turn', stop_sequence: null, usage };
+
+  if (!body.stream) return json(res, 200, message);
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+  const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+  ev('message_start', { message: { ...message, content: [], stop_reason: null, usage: { ...usage, output_tokens: 0 } } });
+  ev('content_block_start', { index: 0, content_block: { type: 'server_tool_use', id, name: 'web_search', input: {} } });
+  ev('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ query }) } });
+  ev('content_block_stop', { index: 0 });
+  ev('content_block_start', { index: 1, content_block: content[1] });
+  ev('content_block_stop', { index: 1 });
+  ev('content_block_start', { index: 2, content_block: { type: 'text', text: '' } });
+  ev('content_block_delta', { index: 2, delta: { type: 'text_delta', text } });
+  ev('content_block_stop', { index: 2 });
+  ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: usage.output_tokens, server_tool_use: usage.server_tool_use } });
+  ev('message_stop', {});
+  res.end();
+}
+
 const anthropicChars = (body) =>
   JSON.stringify(body.system || '').length + JSON.stringify(body.tools || []).length + JSON.stringify(body.messages || []).length;
 
@@ -1067,6 +1213,9 @@ async function handleAnthropic(req, res, route) {
     // Estimate (LM Studio has no exact count endpoint), using the bridge's calibrated ratio.
     return json(res, 200, { input_tokens: Math.round(anthropicChars(body) * tokensPerChar) });
   }
+
+  const searchTool = (body.tools || []).find(isWebSearchTool);
+  if (searchTool) return handleWebSearch(req, res, body, searchTool);
 
   try {
     await ensureModelLoaded(model, () => {});

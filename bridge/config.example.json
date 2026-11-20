@@ -15,6 +15,11 @@
   "contextLength": 0,
   "autoCompact": true,
   "compactAt": 0.7,
+  "webSearchProvider": "exa",
+  "exaApiKey": "",
+  "webSearchType": "auto",
+  "webSearchResults": 8,
+  "webSearchChars": 1500,
   "siteUrl": "",
   "accessToken": ""
 }
