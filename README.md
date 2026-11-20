@@ -75,7 +75,7 @@ Compaction works like Claude Code's:
 
 Measured on the RTX 5070 Ti: a ~40k-token chat compacted to about 2k tokens in roughly 45 seconds, and the model still answered detailed questions about it correctly.
 
-Compaction keeps a long chat going, but it can't help a single message that's too big. Pasting a 48k-token document into a 55k context leaves almost no room. Put big documents in the project folder instead; the model searches them and reads only the parts it needs.
+Compaction keeps a long chat going, but it can't help a single message that's too big. A message that fills most of the context, like a 90k-token paste into 100k, leaves almost no room. Put big documents in the project folder instead; the model searches them and reads only the parts it needs.
 
 Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.6` compacts earlier.
 
@@ -115,7 +115,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
   - **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** set to the model's real context, which is what makes Claude Code auto-compact before it overflows. (The `--autocompact` flag and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only accept 100k–1M.)
   - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` set to 8192.
 
-**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts. With a 55.3k context:
+**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 21k with the launcher's 8,192 reply cap. With the current 100k context that's about **79k**. Measured earlier with a 55.3k context:
 
 | Reply cap | Free for work | Compacts at about |
 |---|---|---|
@@ -138,13 +138,19 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 
 By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which uses the model's saved settings in **My Models**: context length, GPU offload, Flash Attention and KV cache quantization. If the model isn't loaded, LM Studio loads it on the first message with those settings.
 
-Set the context length there to something that fits. Measured on the RTX 5070 Ti with Chrome, Firefox, Discord and Steam open (about 0.8 GB of GPU memory in use):
+Set the context length there to something that fits. Measured on the RTX 5070 Ti with the current model (`qwen3.8-27b-heretic-gsq-rco`) and its saved cache setting of q8_0 keys / q4_0 values:
 
-| Context | Generation speed |
-|---|---|
-| up to 55,296 (54k) | ~45 tokens/s |
-| 57,344 (56k) | ~19 tokens/s |
-| 60,000 | ~4 tokens/s (part of the model ends up in system RAM) |
+| Context | GPU memory used | Generation speed |
+|---|---|---|
+| 64k (65,536) | 14.5 GB | ~49.5 tokens/s |
+| 96k (98,304) | 15.4 GB | ~49.6 tokens/s |
+| **100k (100,000, the saved default)** | 15.4 GB, 15.8 GB after a long chat with an image | ~49.9 tokens/s |
+| 104k (106,496) | 15.7 GB | ~48.9 tokens/s |
+| 112k and up | | fails to load |
+
+For comparison, the previous model (`…@iq3_m`, q8_0 cache) slowed from ~45 to ~4 tokens/s above 55k because part of it ended up in system RAM.
+
+**Saved settings file:** LM Studio keeps each model's settings in `%USERPROFILE%\.lmstudio\.internal\user-concrete-model-default-config\…\<file>.gguf.json`. If you edit it by hand, save it without a BOM. Windows PowerShell's `Set-Content -Encoding utf8` adds one, and LM Studio then silently ignores the file.
 
 The limit moves with whatever else is using the GPU. If replies suddenly crawl, something else is taking GPU memory.
 
@@ -192,9 +198,11 @@ To stop public access entirely: `tailscale funnel --https=443 off`.
 
 ## Model and performance notes
 
-- On the RTX 5070 Ti (16 GB), `qwen3.8-27b-…@iq3_m` with a Q8 KV cache runs at about 45 tokens/s with up to 54k context (with everyday apps open), or 16k while gaming. It thinks before answering; open **Reasoning** to see it.
-- The `@iq4_xs` file (15.8 GB) won't fit on the GPU with context, so it spills into system RAM and gets very slow.
-- Generating a CLAUDE.md for a small project takes about a minute. Even at 58k, the model reads the key files, not a whole large codebase.
+- **Current model:** `qwen3.8-27b-heretic-gsq-rco`, the same uncensored RVN model as before but compressed with the GSQ-RCO method. It's 11.8 GB plus the 0.63 GB vision file (12.42 GB in all, 0.79 GB less than the old IQ3_M). Its publisher measured it within 0.95% of full weights (wikitext-2 perplexity), against +2.9% for a standard IQ3_S. It's from [0bserverx/Qwen3.8-27B-Heretic-GSQ-RCO-GGUF](https://huggingface.co/0bserverx/Qwen3.8-27B-Heretic-GSQ-RCO-GGUF); the vision file is linked from the original RVN folder.
+- **Speed and context:** with keys at q8_0 and values at q4_0, it runs at ~49.5 tokens/s with a 100k context. It thinks before answering; open **Reasoning** to see it.
+- **Long-context check:** with an 87.6k-token document, it found three facts hidden at 10%, 50% and 90% depth. Reading the document took ~87 s before the first word, and replies ran at ~26 tokens/s while the context was that full.
+- **Old files:** the previous `@iq3_m` and `@iq4_xs` files are still in LM Studio. The IQ4_XS won't fit on the GPU with any useful context.
+- **CLAUDE.md generation:** takes about a minute for a small project. The model reads the key files, not a whole large codebase.
 
 ## Security
 
