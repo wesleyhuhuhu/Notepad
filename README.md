@@ -31,6 +31,7 @@ GitHub Pages only serves static files, so the page can't run the model itself. I
 | `bridge/config.json` | Your settings and **secret access token**. Created on first run; never committed. |
 | `bridge/backups/` | A copy of each CLAUDE.md is saved here before every change (last 50 per file). |
 | `start.ps1` | Starts LM Studio's server, loads the model, turns on Funnel, runs the bridge. |
+| `install-autostart.ps1`, `autostart.ps1`, `stop-bridge.ps1` | Start all of that automatically at login (a Windows task), and stop it. |
 
 ## Projects and CLAUDE.md
 
@@ -270,6 +271,14 @@ If it prints a link saying Funnel isn't enabled, open it, approve, then press Ct
 In `bridge/config.json`, change `"allowedOrigins": ["*"]` to `["https://<your-username>.github.io"]`.
 
 ## Every day
+
+**Automatic (set up on this PC).** The **Local LLM bridge** task starts everything when you log in to Windows. It starts LM Studio's server and the model, turns on Funnel, and runs the bridge hidden, restarting it within about 10 seconds if it ever stops. It runs on its own, so closing other apps doesn't stop it.
+- **Log:** `bridge\logs\bridge-<date>.log` has the bridge window's output, without the access token. Logs older than 14 days are deleted.
+- **Stop it:** `.\stop-bridge.ps1`. It starts again at the next login, or now with `Start-ScheduledTask -TaskName 'Local LLM bridge'`.
+- **Remove it:** `.\install-autostart.ps1 -Remove`. Running `.\install-autostart.ps1` sets it up again (no administrator rights needed).
+- **Context at login:** the task loads the model with LM Studio's saved settings (96k). If it's slow, load it at 90k: `lms load qwen3.8-27b-heretic-gsq-rco -y --context-length 90000`.
+
+**By hand:**
 
 ```powershell
 .\start.ps1

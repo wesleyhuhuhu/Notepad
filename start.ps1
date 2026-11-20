@@ -11,11 +11,15 @@
     .\start.ps1 -NoFunnel             # local only, no internet access
     .\start.ps1 -ContextLength 16384  # cap the context, e.g. while a game is using the GPU
                                       # (default: the model's own LM Studio settings)
+    .\start.ps1 -KeepRunning -Quiet   # what the login task uses (autostart.ps1): restart the
+                                      # bridge if it stops, and don't print the access token
 #>
 param(
   [string]$Model = "",
   [int]$ContextLength = 0,
-  [switch]$NoFunnel
+  [switch]$NoFunnel,
+  [switch]$KeepRunning,
+  [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,9 +54,14 @@ if ($ContextLength) {
 }
 $ctxLabel = if ($ContextLength) { "context $ContextLength" } else { "LM Studio's saved settings" }
 
+# lms and tailscale print normal messages on stderr, which Windows PowerShell treats as errors.
+# From here on, show their output as plain text instead of stopping the script.
+$ErrorActionPreference = 'Continue'
+function Show { process { Write-Host "$_" } }
+
 # 1. LM Studio server
 Info "Starting LM Studio server"
-& lms server start 2>&1 | Out-Host
+& lms server start 2>&1 | Show
 
 # 2. Make sure a model is loaded
 $loaded = @()
@@ -63,11 +72,11 @@ try {
 
 if ($Model -and ($loaded -notcontains $Model)) {
   Info "Loading $Model ($ctxLabel)"
-  & lms load $Model @loadArgs 2>&1 | Out-Host
+  & lms load $Model @loadArgs 2>&1 | Show
 } elseif (-not $loaded.Count) {
   Info "No model loaded. Loading the first one LM Studio offers (pass -Model to choose)"
   $first = ($models | Where-Object { $_.type -ne 'embeddings' } | Select-Object -First 1).id
-  if ($first) { & lms load $first @loadArgs 2>&1 | Out-Host }
+  if ($first) { & lms load $first @loadArgs 2>&1 | Show }
   else { Write-Warning "No models downloaded in LM Studio." }
 } else {
   Info "Model already loaded: $($loaded -join ', ')"
@@ -76,13 +85,13 @@ if ($Model -and ($loaded -notcontains $Model)) {
 # 3. Public URL via Tailscale Funnel
 if (-not $NoFunnel) {
   Info "Exposing bridge port $port with Tailscale Funnel"
-  & tailscale funnel --bg $port 2>&1 | Out-Host
+  & tailscale funnel --bg $port 2>&1 | Show
   $dns = ((& tailscale status --json) | ConvertFrom-Json).Self.DNSName.TrimEnd('.')
   $publicUrl = "https://$dns"
   Write-Host ""
   Write-Host "Public bridge URL: $publicUrl" -ForegroundColor Green
-  Write-Host "Access token:      $($cfg.accessToken)" -ForegroundColor Green
-  if ($cfg.siteUrl) {
+  if (-not $Quiet) { Write-Host "Access token:      $($cfg.accessToken)" -ForegroundColor Green }
+  if ($cfg.siteUrl -and -not $Quiet) {
     Write-Host "One-click link:    $($cfg.siteUrl)#bridge=$([uri]::EscapeDataString($publicUrl))&token=$([uri]::EscapeDataString($cfg.accessToken))" -ForegroundColor Green
   }
   Write-Host "(Stop public access later with: tailscale funnel --https=443 off)"
@@ -91,4 +100,14 @@ if (-not $NoFunnel) {
 
 # 4. Bridge (foreground)
 Info "Starting bridge (Ctrl+C to stop)"
-& node (Join-Path $bridge 'server.js')
+if (-not $KeepRunning) {
+  & node (Join-Path $bridge 'server.js')
+  exit $LASTEXITCODE
+}
+# Started at login: if the bridge ever stops, start it again.
+$ErrorActionPreference = 'Continue'
+while ($true) {
+  & node (Join-Path $bridge 'server.js')
+  Info "Bridge stopped (exit code $LASTEXITCODE). Restarting in 10 seconds"
+  Start-Sleep -Seconds 10
+}
