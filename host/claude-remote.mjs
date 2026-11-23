@@ -168,6 +168,13 @@ async function startSession(chatId, cmd) {
   const cwd = insideRoots(cmd.cwd);
   if (!cwd) throw new Error(`"${cmd.cwd}" is not inside the folders this computer allows (${ROOTS.join(', ')}).`);
   const { model, ctx } = await modelInfo();
+  // Claude Code auto-compacts at (declared context − reply cap − ~13k it reserves). Telling it the
+  // window is a little larger than the model's real `ctx` shrinks that reserve, so sessions compact
+  // later — without loading more, so no speed or VRAM cost. The real limit is still `ctx`, so a turn
+  // that overflows it is rejected by LM Studio; keep the extra modest. RESERVE is the margin left
+  // beyond the reply cap once compaction triggers (default 7k; raise it if you see overflow errors).
+  const RESERVE = Number(process.env.CLAUDE_REMOTE_RESERVE_TOKENS) || 7000;
+  const overDeclare = Math.max(0, Math.min(10000, 13000 - RESERVE));
   const env = {
     ...process.env,
     ANTHROPIC_BASE_URL: BRIDGE,
@@ -179,7 +186,7 @@ async function startSession(chatId, cmd) {
     ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
     ANTHROPIC_SMALL_FAST_MODEL: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(ctx),
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(ctx + overDeclare),
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: '16384',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: 'local-llm-claude-remote/1.0',

@@ -187,7 +187,7 @@ The **Claude Code** button starts a Claude Code session on one of your computers
   - **Allow file changes and commands (no approvals):** it works on its own. Use it in folders you don't mind it changing.
   - In every mode, web searches and page reads never ask, reading files never asks, and anything outside the session's folder still asks.
 - **Attachments:** the paperclip (or paste or drag) takes images, videos and any other file, up to 10 MB each and 25 MB per message. Images and video frames go to the model directly. Other files are saved in the session's folder under `uploads/` (never overwriting) and Claude Code is told where they are.
-- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 29k tokens before the end (its 16,384-token reply cap plus about 13k).
+- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 23k tokens before the end: its 16,384-token reply cap plus a ~7k reserve. The reserve is set by telling Claude Code the window is a little larger than the model's real context (`CLAUDE_REMOTE_RESERVE_TOKENS`, default 7000); lowering the reserve compacts later but risks a turn overflowing the real context.
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.

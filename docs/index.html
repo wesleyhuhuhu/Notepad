@@ -1274,8 +1274,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     $('btnCompact').disabled = running() || !chat || !live;
     if (!ctx) return;
     const pct = Math.min(1, (info.used || 0) / ctx);
-    // Claude Code compacts on its own about 29k tokens before the end (16k reply cap + ~13k, see claude-local).
-    const at = info.code ? Math.max(0.5, (ctx - 29400) / ctx) : (status && status.compactAt) || 0.7;
+    // Claude Code compacts on its own about 23k tokens before the end (16k reply cap + ~7k reserve, see claude-remote).
+    const at = info.code ? Math.max(0.5, (ctx - 23400) / ctx) : (status && status.compactAt) || 0.7;
     el.className = 'ctx' + (pct >= 0.9 ? ' full' : pct >= at - 0.05 ? ' warn' : '');
     $('ctxFill').style.width = (pct * 100).toFixed(1) + '%';
     $('ctxText').textContent = `${info.approx ? '~' : ''}${kTok(info.used || 0)} / ${kTok(ctx)}`;
@@ -1284,7 +1284,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       (info.tools && info.peak > info.used + 1000 ? ` (up to ${info.peak.toLocaleString()} during the last reply, while it used tools)` : '') +
       '.' +
       (info.code
-        ? ` Claude Code compacts the session by itself at about ${kTok(ctx - 29400)}.`
+        ? ` Claude Code compacts the session by itself at about ${kTok(ctx - 23400)}.`
         : status && status.autoCompact ? ` Older messages are compacted automatically past ${Math.round(at * 100)}%.` : '');
   }
 
