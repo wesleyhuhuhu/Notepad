@@ -13,6 +13,7 @@
 #   claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
 #   claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
 #   claude-local --max-output 12000      longest reply, thinking included (default 16384)
+#   claude-local --reserve 7000          tokens kept free before auto-compaction (default 7000; lower compacts later)
 #   claude-local --setup                 change the saved address or token
 #
 # Install:  mkdir -p ~/bin && cp claude-local.sh ~/bin/claude-local && chmod +x ~/bin/claude-local
@@ -22,13 +23,14 @@ CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-local"
 CFG_FILE="$CFG_DIR/config"
 CORE_TOOLS="Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch"
 
-setup=0; all_tools=0; context=0; max_output=16384; pass=()
+setup=0; all_tools=0; context=0; max_output=16384; reserve=7000; pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --setup) setup=1 ;;
     --all-tools) all_tools=1 ;;
     --context) shift; context="${1:-0}" ;;
     --max-output) shift; max_output="${1:-16384}" ;;
+    --reserve) shift; reserve="${1:-7000}" ;;
     *) pass+=("$1") ;;
   esac
   shift
@@ -85,12 +87,14 @@ for v in ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_M
          ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_SUBAGENT_MODEL; do
   export "$v=$model"
 done
-# The model's real context window, so auto-compact happens before it overflows.
-export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"
-# Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
-# reply cap: 16384 (room for long thinking) -> compacts at about ctx - 29k.
+# Declare a little more than the real context so Claude Code's ~13k auto-compact reserve shrinks to
+# $reserve (default 7k), compacting later. The real model limit is still $ctx, so keep it modest; a
+# turn that overflows $ctx is still rejected by LM Studio. See host/claude-remote.mjs.
+over=$(( 13000 - reserve )); if [ "$over" -lt 0 ]; then over=0; elif [ "$over" -gt 10000 ]; then over=10000; fi
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$(( ctx + over ))"
+# reply cap 16384 leaves room for long thinking; auto-compact fires at about ctx - max_output - reserve.
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$max_output"
-if [ $(( ctx - max_output - 13000 )) -lt 10000 ]; then
+if [ $(( ctx - max_output - reserve )) -lt 10000 ]; then
   echo "A $ctx-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." >&2
 fi
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1

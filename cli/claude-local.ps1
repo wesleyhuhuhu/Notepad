@@ -12,6 +12,7 @@
     claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
     claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
     claude-local --max-output 12000      longest reply, thinking included (default 16384)
+    claude-local --reserve 7000          tokens kept free before auto-compaction (default 7000; lower compacts later)
     claude-local --setup                 change the saved address or token
 
   If PowerShell blocks the script, run claude-local.cmd instead, or:
@@ -24,7 +25,7 @@ $cfgFile = Join-Path $cfgDir 'config.json'
 $coreTools = 'Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch'
 
 # --- our own options (double-dash, so they never clash with claude's short flags) ---
-$setup = $false; $allTools = $false; $context = 0; $maxOutput = 16384
+$setup = $false; $allTools = $false; $context = 0; $maxOutput = 16384; $reserve = 7000
 $pass = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch ($args[$i]) {
@@ -32,6 +33,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--all-tools'  { $allTools = $true }
     '--context'    { $i++; $context = [int]$args[$i] }
     '--max-output' { $i++; $maxOutput = [int]$args[$i] }
+    '--reserve'    { $i++; $reserve = [int]$args[$i] }
     default        { $pass.Add([string]$args[$i]) }
   }
 }
@@ -95,12 +97,14 @@ try {
   $env:ANTHROPIC_AUTH_TOKEN = $cfg.token
   Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
   foreach ($v in $modelVars) { Set-Item "Env:$v" $model }
-  # The model's real context window, so auto-compact happens before it overflows.
-  $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$ctx"
-  # Claude Code keeps room for one full reply plus ~13k free before it compacts, so a smaller
-  # reply cap: 16384 (room for long thinking) -> compacts at about ctx - 29k.
+  # Declare a little more than the real context so Claude Code's ~13k auto-compact reserve shrinks
+  # to $reserve (default 7k), compacting later. The real model limit is still $ctx, so keep it modest;
+  # a turn that overflows $ctx is still rejected by LM Studio. See host/claude-remote.mjs.
+  $over = [Math]::Max(0, [Math]::Min(10000, 13000 - $reserve))
+  $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$($ctx + $over)"
+  # reply cap 16384 leaves room for long thinking; auto-compact fires at about ctx - maxOutput - reserve.
   $env:CLAUDE_CODE_MAX_OUTPUT_TOKENS = "$maxOutput"
-  if ($ctx - $maxOutput - 13000 -lt 10000) {
+  if ($ctx - $maxOutput - $reserve -lt 10000) {
     Write-Host ("A {0:N0}-token context leaves Claude Code almost no room before it compacts. It works best with 32k or more." -f $ctx) -ForegroundColor Yellow
   }
   $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'

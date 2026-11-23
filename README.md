@@ -129,6 +129,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 | `--all-tools` | Every Claude Code tool. By default only Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch are sent, which keeps the setup at ~5.3k tokens instead of ~16.5k. |
 | `--max-output N` | Longest reply, thinking included (default 16384). Lower leaves more room before compaction; higher allows longer thinking. |
 | `--context N` | Tell Claude Code a smaller context than the loaded model's. |
+| `--reserve N` | Tokens kept free before Claude Code auto-compacts (default 7000). Lower compacts later, but a turn that overflows the real context is rejected. |
 | `--setup` | Change the saved address or token. |
 
 **How it works:**
