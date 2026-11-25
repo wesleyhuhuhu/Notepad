@@ -209,6 +209,18 @@ aside#mdpanel.open { display: flex; }
 .codebar { font-size: 12.5px; color: var(--muted); margin: 0 0 16px; display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center; }
 .codebar code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .codebar .off { color: var(--warn); font-weight: 600; }
+.codebar select { font: inherit; font-size: 12.5px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); max-width: 100%; }
+/* Commands typed with "/" in the message box. */
+.composer { position: relative; }
+.slashpop { position: absolute; left: 16px; right: 16px; bottom: calc(100% - 4px); max-width: 560px; margin: 0 auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.14);
+  padding: 4px; z-index: 20; max-height: 50vh; overflow-y: auto; }
+.slashpop[hidden] { display: none; }
+.slashpop button { display: flex; gap: 10px; width: 100%; text-align: left; align-items: baseline; padding: 7px 10px;
+  border: 0; border-radius: 7px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.slashpop button.sel, .slashpop button:hover { background: var(--chip); }
+.slashpop b { font-family: var(--mono); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.slashpop span { color: var(--muted); font-size: 13px; }
 .blk-tool { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; background: var(--panel); }
 .blk-tool summary { padding: 5px 10px; cursor: pointer; font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .blk-tool.ok summary::before { content: "✓ "; color: var(--ok); }
@@ -303,6 +315,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       <button id="jump" hidden>↓ Latest</button>
     </div>
     <div class="composer">
+      <div class="slashpop" id="slashPop" role="listbox" aria-label="Commands" hidden></div>
       <div class="inner" id="tray"></div>
       <div class="inner">
         <button id="attach" title="Attach images or a video" aria-label="Attach images or a video">
@@ -359,7 +372,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         <option value="default">Ask before every file change and command</option>
         <option value="acceptEdits">Allow file changes; ask before commands</option>
         <option value="allowAll">Allow file changes and commands (no approvals)</option>
+        <option value="plan">Plan only: no changes until you approve a plan</option>
       </select>
+      <div class="hint">You can change this at any time in the session, or with /mode.</div>
     </div>
     <div class="row">
       <span class="grow err" id="cdResult"></span>
@@ -637,9 +652,15 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     box.textContent = '';
     const byTime = (a, b) => b.updatedAt - a.updatedAt;
     // Sessions in a project folder are listed with that project; the rest (other folders and computers) on their own.
-    const code = chatList.filter((c) => c.kind === 'code' && !c.project).sort(byTime);
-    const items = chatList.filter((c) => (c.project || '') === project).sort(byTime);
+    const code = chatList.filter((c) => c.kind === 'code' && !c.project && c.origin !== 'terminal').sort(byTime);
+    const note = chatList.filter((c) => c.kind === 'code' && c.origin === 'terminal').sort(byTime);
+    const items = chatList.filter((c) => (c.project || '') === project && c.origin !== 'terminal').sort(byTime);
     const section = (text) => { const h = div('side-sec'); h.textContent = text; box.appendChild(h); };
+    // Note sessions are started in a terminal on some computer (the Note app); they're listed on their own.
+    if (note.length) {
+      section('Note sessions');
+      for (const c of note) box.appendChild(chatItem(c));
+    }
     if (code.length) {
       section('Claude Code sessions');
       for (const c of code) box.appendChild(chatItem(c));
@@ -699,7 +720,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
       } catch {}
     }
     if (s.waiting > ((before && before.waiting) || 0) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-      try { new Notification(s.title || 'Claude Code', { body: 'Claude Code is waiting for your approval', tag: s.id + ':approve' }); } catch {}
+      const agent = s.origin === 'terminal' ? 'Note' : 'Claude Code';
+      try { new Notification(s.title || agent, { body: agent + ' is waiting for your approval', tag: s.id + ':approve' }); } catch {}
     }
     if (chat && chat.id === s.id && s.lastRun) markSeen(s);
     renderChatList();
@@ -903,6 +925,11 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
         return;
       case 'chat':
         chat.title = ev.title;
+        return;
+      case 'mode':
+        // Changed here, on another device, or in the session's terminal.
+        chat.permissionMode = ev.mode;
+        refreshCodeBar();
         return;
       default: {
         const m = byId(ev.id);
@@ -1549,7 +1576,111 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 
   // Sends a message. The reply is written on the PC and streams in through follow(); it keeps
   // going if this page closes. While a reply runs, the button stops it instead.
+  // ------------------------------------------------------ "/" commands --
+  // Typed in the message box, like Claude Code's. Anything else starting with "/" is sent as a
+  // normal message, so Claude Code's and Note's own commands (e.g. /init) still reach them.
+  const COMMANDS = [
+    { name: 'compact', args: '[focus]', help: 'Summarize the conversation so far to free up context', where: 'both' },
+    { name: 'mode', args: '[ask|edits|auto|plan]', help: 'Set the session\'s permission mode', where: 'code' },
+    { name: 'new', args: '', help: 'Start a new chat (in a session: a new session)', where: 'both' },
+    { name: 'stop', args: '', help: 'Stop the reply or turn in progress', where: 'both' },
+    { name: 'help', args: '', help: 'Show these commands', where: 'both' },
+  ];
+  const MODE_WORDS = { ask: 'default', default: 'default', edits: 'acceptEdits', 'accept-edits': 'acceptEdits', acceptedits: 'acceptEdits', 'auto-edit': 'acceptEdits', auto: 'allowAll', all: 'allowAll', allowall: 'allowAll', plan: 'plan' };
+  const availableCommands = () => COMMANDS.filter((c) => c.where === 'both' || (c.where === 'code' && isCode()));
+
+  // Returns true when the text was a command handled here (nothing is sent as a message).
+  async function runCommand(text) {
+    const m = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(text);
+    if (!m) return false;
+    const name = m[1].toLowerCase();
+    const arg = (m[2] || '').trim();
+    if (!availableCommands().some((c) => c.name === name)) return false;
+    switch (name) {
+      case 'help':
+        showSlash('/', true);
+        return true;
+      case 'new':
+        if (isCode()) openCodeDialog(); else { newChat(); $('input').focus(); }
+        return true;
+      case 'stop':
+        if (chat && running()) await apiJson(`/api/chats/${chat.id}/stop`, { method: 'POST' }).catch((e) => flashTray(e.message));
+        else flashTray('Nothing is running.');
+        return true;
+      case 'mode': {
+        if (!arg) {
+          const sel = $('list').querySelector('.modesel');
+          if (sel) { sel.focus(); try { sel.showPicker(); } catch {} }
+          flashTray(`Mode: ${MODE_LABEL[chat.permissionMode || 'default']}. Type /mode ask, edits, auto or plan.`);
+          return true;
+        }
+        const mode = MODE_WORDS[arg.toLowerCase()];
+        if (!mode) { flashTray(`Unknown mode "${arg}". Use ask, edits, auto or plan.`); return true; }
+        await setSessionMode(mode);
+        return true;
+      }
+      case 'compact':
+        // In a Claude Code or Note session, the agent compacts its own context: send it on.
+        if (isCode()) return false;
+        if (!chat || !sendable(messages).live.length) { flashTray('Nothing to compact yet.'); return true; }
+        if (running()) { flashTray('Wait for the reply to finish, or /stop it.'); return true; }
+        try {
+          await apiJson(`/api/chats/${chat.id}/compact`, {
+            method: 'POST',
+            body: JSON.stringify({ model: $('model').value || undefined, instructions: arg, saveProgress: true, allowEdits: $('allowEdits').checked }),
+          });
+          flashTray('Compacting…');
+        } catch (e) { flashTray(e.message); }
+        return true;
+    }
+    return false;
+  }
+
+  // The suggestion list shown while typing a command name.
+  let slashSel = 0;
+  let slashList = []; // what the list shows right now
+  let slashAll = false; // showing every command (/help) rather than matches
+  function slashMatches(value) {
+    const m = /^\/([a-z-]*)$/i.exec(value);
+    if (!m) return [];
+    return availableCommands().filter((c) => c.name.startsWith(m[1].toLowerCase()));
+  }
+  function showSlash(value, all) {
+    const pop = $('slashPop');
+    const list = all ? availableCommands() : slashMatches(value);
+    slashList = list;
+    slashAll = !!all;
+    if (!list.length) { pop.hidden = true; return; }
+    slashSel = Math.min(slashSel, list.length - 1);
+    pop.textContent = '';
+    list.forEach((c, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'option');
+      if (i === slashSel) b.className = 'sel';
+      b.append(Object.assign(document.createElement('b'), { textContent: '/' + c.name + (c.args ? ' ' + c.args : '') }), Object.assign(document.createElement('span'), { textContent: c.help }));
+      b.onmousedown = (e) => { e.preventDefault(); pickSlash(c); };
+      pop.appendChild(b);
+    });
+    pop.hidden = false;
+  }
+  function hideSlash() { $('slashPop').hidden = true; slashSel = 0; }
+  function pickSlash(c) {
+    hideSlash();
+    $('input').value = '/' + c.name + (c.args ? ' ' : '');
+    autosize();
+    $('input').focus();
+    if (!c.args) send();
+  }
+
   async function send(textOverride) {
+    hideSlash();
+    if (running() && typeof textOverride !== 'string' && /^\/(stop|help|mode)\b/i.test($('input').value.trim()) && !pending.length) {
+      // These work while something is running (the Send button is Stop then).
+      const text = $('input').value.trim();
+      if (await runCommand(text)) { $('input').value = ''; autosize(); }
+      return;
+    }
     if (running()) {
       apiJson(`/api/chats/${chat.id}/stop`, { method: 'POST' }).catch((e) => flashTray(e.message));
       return;
@@ -1560,6 +1691,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     if (fromInput && pending.some((p) => p.loading)) { flashTray('Still reading attachments…'); return; }
     const atts = fromInput ? pending.filter((p) => !p.error && ((p.images && p.images.length) || (isCode() && p.kind === 'file' && p.data))) : [];
     if (!text && !atts.length) return;
+    if (fromInput && !atts.length && text.startsWith('/') && (await runCommand(text))) {
+      $('input').value = ''; autosize();
+      return;
+    }
     if (!settings.bridgeUrl || !settings.token) { openSettings(); return; }
 
     const keepText = $('input').value;
@@ -1609,7 +1744,7 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   function updateMode() {
     const code = isCode();
     document.body.classList.toggle('code-mode', code);
-    $('input').placeholder = code ? 'Tell Claude Code what to do…' : 'Message your local model…';
+    $('input').placeholder = code ? `Tell ${chat.origin === 'terminal' ? 'Note' : 'Claude Code'} what to do…` : 'Message your local model…';
     // In a Claude Code session the header shows its folder instead of the project menu.
     $('project').hidden = code;
     $('where').hidden = !code;
@@ -1645,20 +1780,67 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   function codeBar() {
     const bar = div('codebar');
     const h = hostOf(chat.host);
+    const terminal = chat.origin === 'terminal';
     const where = document.createElement('span');
-    where.append('Claude Code on ', Object.assign(document.createElement('b'), { textContent: (h && h.name) || chat.hostName || chat.host }), ' in ');
+    where.append(terminal ? 'Note on ' : 'Claude Code on ', Object.assign(document.createElement('b'), { textContent: (h && h.name) || chat.hostName || chat.host }), ' in ');
     where.appendChild(Object.assign(document.createElement('code'), { textContent: chat.cwd }));
     bar.appendChild(where);
-    const mode = document.createElement('span');
-    mode.textContent = { acceptEdits: '· file changes allowed, commands ask', allowAll: '· file changes and commands allowed' }[chat.permissionMode] || '· asks before every change';
-    bar.appendChild(mode);
+    if (terminal) bar.appendChild(Object.assign(document.createElement('span'), { textContent: '· running in a terminal there ·' }));
+    bar.appendChild(modeSelect());
     if (!h || !h.online) {
       const off = document.createElement('span');
       off.className = 'off';
-      off.textContent = 'Offline: start claude-remote on that computer to continue.';
+      off.textContent = terminal
+        ? 'Closed: the terminal running this session has quit. Start note there to begin a new one.'
+        : 'Offline: start claude-remote on that computer to continue.';
       bar.appendChild(off);
     }
     return bar;
+  }
+
+  // A session's permission mode (bridge/hosts.js MODES). Changes apply at once on its computer.
+  const MODE_LABEL = { default: 'Ask permissions', acceptEdits: 'Auto-accept edits', allowAll: 'Auto', plan: 'Plan', yolo: 'YOLO (set in the terminal)' };
+  function modeHelp(mode) {
+    const note = chat && chat.origin === 'terminal';
+    return {
+      default: 'Asks before every file change and command.',
+      acceptEdits: 'File changes in the folder are made without asking; commands still ask.',
+      allowAll: note ? "Note's Auto mode: a safety check decides, and safe actions run without asking." : 'File changes and commands in the folder run without asking. Anything outside the folder still asks.',
+      plan: 'Only plans: no changes until you approve the plan.',
+      yolo: 'Everything runs without asking. Set in the terminal; pick another mode here to leave it.',
+    }[mode] || '';
+  }
+  function modeSelect() {
+    const sel = document.createElement('select');
+    sel.className = 'modesel';
+    sel.setAttribute('aria-label', 'Permission mode');
+    const cur = chat.permissionMode || 'default';
+    for (const m of ['default', 'acceptEdits', 'allowAll', 'plan', ...(cur === 'yolo' ? ['yolo'] : [])]) {
+      const o = new Option(MODE_LABEL[m], m, m === cur, m === cur);
+      if (m === 'yolo') o.disabled = true;
+      sel.appendChild(o);
+    }
+    sel.title = modeHelp(cur);
+    sel.onchange = () => setSessionMode(sel.value);
+    return sel;
+  }
+  function refreshCodeBar() {
+    const old = $('list').querySelector('.codebar');
+    if (old && isCode()) old.replaceWith(codeBar());
+  }
+  async function setSessionMode(mode) {
+    if (!isCode()) return;
+    const before = chat.permissionMode || 'default';
+    chat.permissionMode = mode;
+    refreshCodeBar();
+    try {
+      await apiJson(`/api/chats/${chat.id}/mode`, { method: 'POST', body: JSON.stringify({ mode }) });
+      flashTray(`Mode: ${MODE_LABEL[mode]}. ${modeHelp(mode)}`);
+    } catch (e) {
+      chat.permissionMode = before;
+      refreshCodeBar();
+      flashTray(e.message);
+    }
   }
 
   function hostsChanged() {
@@ -1822,16 +2004,18 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const sel = $('cdHost');
     const keep = sel.value || store.get('codeHost', '');
     sel.innerHTML = '';
-    for (const h of hostList) {
+    // Note terminals can't start sessions from here (they start in their terminal).
+    const startable = hostList.filter((h) => !h.terminal);
+    for (const h of startable) {
       const o = document.createElement('option');
       o.value = h.id;
       o.textContent = h.name + (h.managed ? ' (this PC)' : '') + (h.online ? '' : ' (offline)');
       o.disabled = !h.online;
       sel.appendChild(o);
     }
-    const first = hostList.find((h) => h.online);
-    sel.value = hostList.some((h) => h.id === keep && h.online) ? keep : first ? first.id : '';
-    $('cdHostHint').textContent = hostList.length
+    const first = startable.find((h) => h.online);
+    sel.value = startable.some((h) => h.id === keep && h.online) ? keep : first ? first.id : '';
+    $('cdHostHint').textContent = startable.length
       ? 'To add another computer, run claude-remote on it (see the README).'
       : 'No computers are connected. The PC starts one with the bridge; on others, run claude-remote.';
     fillDirs();
@@ -2057,8 +2241,26 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     t.style.height = Math.min(t.scrollHeight + 2, 200) + 'px';
     t.style.overflowY = t.scrollHeight > 200 ? 'auto' : 'hidden';
   }
-  $('input').addEventListener('input', autosize);
+  $('input').addEventListener('input', () => { autosize(); slashSel = 0; showSlash($('input').value); });
+  $('input').addEventListener('blur', () => setTimeout(hideSlash, 150));
   $('input').addEventListener('keydown', (e) => {
+    // While the command list is open: arrows move, Tab completes, Enter runs, Esc closes.
+    const pop = $('slashPop');
+    if (!pop.hidden) {
+      const list = slashList;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        slashSel = (slashSel + (e.key === 'ArrowDown' ? 1 : list.length - 1)) % Math.max(1, list.length);
+        showSlash($('input').value, slashAll);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); hideSlash(); return; }
+      if ((e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) && list[slashSel]) {
+        e.preventDefault();
+        pickSlash(list[slashSel]);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !matchMedia('(pointer: coarse)').matches) {
       e.preventDefault();
       send();

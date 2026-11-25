@@ -833,6 +833,58 @@ async function summarize({ messages, previous, instructions, model, ctxLen, sign
   return summary;
 }
 
+// Faster compaction: sends the chat exactly as the model last read it (same system prompt, tools
+// and messages) with a request to summarize added at the end. LM Studio then reuses what it has
+// already processed instead of reading the whole chat again, and the model sees the real chat,
+// images included. Returns null when this can't be used (the chat doesn't fit, or the model
+// replied or called a tool instead of summarizing); the caller then falls back to summarize().
+async function summarizeInPlace({ system, tools, messages, previous, instructions, model, ctxLen, signal, onStatus }) {
+  const chat = [{ role: 'system', content: system }, ...messages];
+  if (!ctxLen || !messages.length || estimate(chat, tools).tokens + SUMMARY_MAX_TOKENS + 1500 > ctxLen) return null;
+  onStatus('Compacting the conversation to free up context…');
+  const request = [
+    '[This message is from the chat app, not the user.] Stop here: do not reply to the conversation and do not call any tools.',
+    previous
+      ? 'Instead, write one updated summary that merges the earlier summary in your system prompt with the conversation above.'
+      : 'Instead, write a summary of the conversation above.',
+    'The summary will replace the conversation and the images in it will no longer be visible, so describe anything in them that matters.',
+    instructions ? `When summarizing, pay special attention to: ${instructions}` : '',
+    '',
+    SUMMARY_SYSTEM,
+  ].join('\n');
+  let j;
+  try {
+    const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        reasoning_effort: 'none',
+        temperature: 0.3,
+        max_tokens: SUMMARY_MAX_TOKENS,
+        ...(tools ? { tools } : {}),
+        messages: [...chat, { role: 'user', content: request }],
+      }),
+      signal,
+    });
+    if (!r.ok) throw new Error(`LM Studio returned ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}`);
+    j = await r.json();
+  } catch (e) {
+    if (signal && signal.aborted) throw e;
+    log('In-place compaction failed, summarizing the transcript instead: ' + e.message);
+    return null;
+  }
+  const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
+  const text = stripThink(msg.content || '');
+  const at = text.search(/^##\s*Goal and requests/im);
+  if ((msg.tool_calls && msg.tool_calls.length) || at < 0 || !/^##\s*Current state/im.test(text)) {
+    log('In-place compaction did not return a summary, summarizing the transcript instead.');
+    return null;
+  }
+  return text.slice(at).trim();
+}
+
 // Puts the summary's Progress section into a CLAUDE.md, replacing any earlier one.
 async function saveProgress(target, summary) {
   const lines = summary.split(/\r?\n/);
@@ -977,12 +1029,13 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
 // One reply: `body` is { messages, project, model, allowEdits, system, temperature, saveProgress },
 // where messages = an optional { role: 'summary' } message plus the live user/assistant messages.
 // Progress goes out through send(event); errors are thrown. Used by background runs (chats.js).
-async function chatCore(body, send, signal) {
+// The tools and system prompt a chat runs with. Compaction uses the same ones, so its request
+// starts exactly like the chat's own requests and LM Studio can reuse its cache (summarizeInPlace).
+// Throws if the project doesn't exist.
+async function chatSetup(body) {
   const allowEdits = cfg.allowModelEdits && body.allowEdits !== false;
   const project = typeof body.project === 'string' && body.project ? body.project : null;
   const allowCode = cfg.allowCodeReading && !!project;
-
-  // Validate the project before switching to a streaming response.
   let projectDir = null;
   let projectTarget = null;
   if (project) {
@@ -992,6 +1045,16 @@ async function chatCore(body, send, signal) {
   const globalTarget = await mdTarget(null);
   const allowWeb = cfg.allowWebTools !== false;
   const tools = buildTools({ project, allowEdits, allowCode, allowWeb });
+  const globalMd = await readMd(globalTarget);
+  const projectMd = projectTarget ? await readMd(projectTarget) : null;
+  const systemFor = (summary) =>
+    buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, allowWeb, extra: body.system, summary });
+  return { allowEdits, project, projectDir, projectTarget, globalTarget, tools, systemFor };
+}
+
+async function chatCore(body, send, signal) {
+  // Validates the project before anything else happens.
+  const { project, projectDir, projectTarget, globalTarget, allowEdits, tools, systemFor } = await chatSetup(body);
   const ctx = { project, projectDir, projectTarget, globalTarget };
   const ac = { signal };
 
@@ -1004,10 +1067,6 @@ async function chatCore(body, send, signal) {
       send({ type: 'status', text: '' });
     }
     const ctxLen = await loadedContext(model);
-    const globalMd = await readMd(globalTarget);
-    const projectMd = projectTarget ? await readMd(projectTarget) : null;
-    const systemFor = (summary) =>
-      buildSystemPrompt({ globalMd, project, projectDir, projectMd, allowEdits, allowCode, allowWeb, extra: body.system, summary });
 
     let summary = lastSummary(body.messages);
     let history = sanitizeHistory(body.messages);
@@ -1030,7 +1089,10 @@ async function chatCore(body, send, signal) {
       if (count > 0) {
         const before = est.tokens;
         const status = (text) => send({ type: 'status', text });
-        summary = await summarize({ messages: history.slice(0, count), previous: summary, model, ctxLen, signal: ac.signal, onStatus: status });
+        const older = history.slice(0, count);
+        summary =
+          (await summarizeInPlace({ system: systemFor(summary), tools, messages: older, previous: summary, model, ctxLen, signal: ac.signal, onStatus: status })) ||
+          (await summarize({ messages: older, previous: summary, model, ctxLen, signal: ac.signal, onStatus: status }));
         history = history.slice(count);
         est = estimate([{ role: 'system', content: systemFor(summary) }, ...history], tools);
         const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
@@ -1450,6 +1512,83 @@ async function handleAnthropic(req, res, route) {
   res.end();
 }
 
+// --------------------------------------------------------------- Note API ---
+// OpenAI-format endpoint for Note (the terminal agent, in its own repo) under /note/v1. Whatever
+// model name Note sends (normally "note") is mapped to the bridge's model, and replies name the
+// model "note", so the real model name never shows up in Note.
+const NOTE_MODEL = 'note';
+
+// The model's chat template only allows a system message at the start: keep the leading ones
+// there and fold later ones into the neighbouring user turn (as for Claude Code).
+function foldOpenAiSystem(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let i = 0;
+  const lead = [];
+  while (i < list.length && list[i] && list[i].role === 'system') lead.push(systemTextOf(list[i++]).trim());
+  const rest = foldSystemMessages(list.slice(i));
+  const text = lead.filter(Boolean).join('\n\n');
+  return text ? [{ role: 'system', content: text }, ...rest] : rest;
+}
+
+async function handleNoteChat(req, res) {
+  const body = await readJson(req, 64 * 1024 * 1024);
+  const model = await resolveModel(null);
+  body.model = model;
+  body.messages = foldOpenAiSystem(body.messages);
+  try {
+    await ensureModelLoaded(model, () => {});
+  } catch (e) {
+    log('model load: ' + e.message);
+  }
+  log(`Note: ${body.messages.length} messages, ${(body.tools || []).length} tools${body.stream ? ', streaming' : ''} -> ${model}`);
+
+  const ac = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) ac.abort();
+  });
+  let upstream;
+  try {
+    upstream = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    return json(res, 502, { error: { message: friendlyError(e), type: 'api_error' } });
+  }
+  // LM Studio names the model in "model" and again in "system_fingerprint".
+  const modelRe = new RegExp(`"(model|system_fingerprint)"\\s*:\\s*"${String(model).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g');
+  const rename = (s) => s.replace(modelRe, (_, key) => `"${key}":"${NOTE_MODEL}"`);
+  if (!upstream.ok) {
+    const text = await upstream.text().catch(() => '');
+    log(`Note: LM Studio returned ${upstream.status}: ${text.slice(0, 300)}`);
+    res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') || 'application/json' });
+    return res.end(rename(text));
+  }
+  res.writeHead(200, {
+    'Content-Type': upstream.headers.get('content-type') || 'application/json',
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no',
+  });
+  // Rename the model line by line, so a name split across two chunks is still caught.
+  const dec = new TextDecoder();
+  let buf = '';
+  try {
+    for await (const chunk of upstream.body) {
+      buf += dec.decode(chunk, { stream: true });
+      const cut = buf.lastIndexOf('\n') + 1;
+      if (cut > 0) {
+        res.write(rename(buf.slice(0, cut)));
+        buf = buf.slice(cut);
+      }
+    }
+  } catch (e) {
+    if (!ac.signal.aborted) log('Note stream error: ' + e.message);
+  }
+  res.end(rename(buf + dec.decode()));
+}
+
 // Server-sent events to one client. Closing the connection only stops this stream: background
 // runs keep going. Returns send(obj) and close(); onClose runs when the client goes away.
 function openEventStream(req, res, onClose) {
@@ -1478,7 +1617,7 @@ function openEventStream(req, res, onClose) {
 
 // Manual compaction (the site's Compact button, like Claude Code's /compact): summarizes the
 // whole live part of the chat, optionally focusing on what the user asks for.
-// `body` is { messages, project, model, allowEdits, instructions, saveProgress }.
+// `body` is { messages, project, model, allowEdits, system, instructions, saveProgress }.
 async function compactCore(body, send, signal) {
   const project = typeof body.project === 'string' && body.project ? body.project : null;
   const projectTarget = project ? await mdTarget(project) : null;
@@ -1494,15 +1633,13 @@ async function compactCore(body, send, signal) {
   } catch {}
   const ctxLen = (await loadedContext(model)) || 16384;
   const before = estimate([...(previous ? [{ content: previous }] : []), ...history]).tokens;
-  const summary = await summarize({
-    messages: history,
-    previous,
-    instructions,
-    model,
-    ctxLen,
-    signal,
-    onStatus: (text) => send({ type: 'status', text }),
-  });
+  const args = { messages: history, previous, instructions, model, ctxLen, signal, onStatus: (text) => send({ type: 'status', text }) };
+  let setup = null;
+  try {
+    setup = await chatSetup(body);
+  } catch {}
+  const summary =
+    (setup && (await summarizeInPlace({ ...args, system: setup.systemFor(previous), tools: setup.tools }))) || (await summarize(args));
   const progressSaved = !!(projectTarget && allowEdits && body.saveProgress !== false && (await saveProgress(projectTarget, summary)));
   if (progressSaved) send({ type: 'claude_md_updated', scope: 'project', project });
   const after = estimateMessage({ content: summary });
@@ -1812,6 +1949,11 @@ const server = http.createServer(async (req, res) => {
         return await handleAnthropic(req, res, url.pathname.replace(/\/+$/, ''));
       case 'GET /v1/models':
         return json(res, 200, { data: (await listModels()).map((m) => ({ type: 'model', id: m.id, display_name: m.id })), has_more: false });
+      // Note, the terminal agent (OpenAI format; the model is always called "note").
+      case 'POST /note/v1/chat/completions':
+        return await handleNoteChat(req, res);
+      case 'GET /note/v1/models':
+        return json(res, 200, { object: 'list', data: [{ id: NOTE_MODEL, object: 'model', created: 0, owned_by: 'local' }] });
       case 'GET /api/claude-code': {
         // What the launcher scripts need: the model to use and its context size, as KEY=VALUE lines.
         const model = await resolveModel(url.searchParams.get('model'));
@@ -1858,7 +2000,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages, fetchPage, privateAddress, htmlToText };
+module.exports = { listProjectFiles, readProjectFile, searchProject, getProjectDir, validProjectName, saveProgress, imageSize, foldSystemMessages, fetchPage, privateAddress, htmlToText, chatSetup, summarize, summarizeInPlace, sanitizeHistory, estimate };
 
 if (require.main === module) chats.init().then(() => hosts.adoptExisting()).then(() => server.listen(cfg.port, cfg.host, () => {
   log(`Bridge listening on http://${cfg.host}:${cfg.port}`);

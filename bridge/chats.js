@@ -101,6 +101,8 @@ module.exports = function createChats(d) {
     host: c.host || undefined,
     cwd: c.cwd || undefined,
     waiting: c.waiting || 0,
+    origin: c.origin || undefined, // 'terminal': a Note session started in a terminal
+    closed: c.closed || undefined,
   });
 
   function broadcastList(ev) {
@@ -351,6 +353,8 @@ module.exports = function createChats(d) {
           project: chat.project || null,
           model: opts.model,
           allowEdits: opts.allowEdits,
+          // The custom instructions of the last reply, so the request matches the chat's (cache reuse).
+          system: chat.lastSystem,
           instructions: opts.instructions,
           saveProgress: opts.saveProgress,
         },
@@ -461,6 +465,8 @@ module.exports = function createChats(d) {
     chat.updatedAt = Date.now();
     emit(chat, { type: 'message', message: user });
     emit(chat, { type: 'message', message: a });
+    const system = typeof body.system === 'string' ? body.system.slice(0, 20000) : undefined;
+    chat.lastSystem = system;
     setRun(chat, {
       kind: 'reply',
       state: 'queued',
@@ -468,7 +474,7 @@ module.exports = function createChats(d) {
       opts: {
         model: typeof body.model === 'string' && body.model ? body.model : undefined,
         allowEdits: body.allowEdits !== false,
-        system: typeof body.system === 'string' ? body.system.slice(0, 20000) : undefined,
+        system,
       },
     });
     await saveNow(chat);
@@ -560,7 +566,7 @@ module.exports = function createChats(d) {
         return true;
       }
     }
-    const m = /^\/api\/chats\/([a-z0-9]+)(?:\/(messages|stop|compact|stream|permission))?$/.exec(p);
+    const m = /^\/api\/chats\/([a-z0-9]+)(?:\/(messages|stop|compact|stream|permission|mode))?$/.exec(p);
     if (!m) return false;
     const chat = getChat(m[1]);
     const action = `${req.method} ${m[2] || ''}`;
@@ -593,6 +599,11 @@ module.exports = function createChats(d) {
       case 'POST permission':
         if (chat.kind !== 'code') throw httpError(400, 'Only Claude Code sessions ask for approval.');
         json(res, 200, code.permission(chat, await readJson(req)));
+        return true;
+      case 'POST mode':
+        // Ask / auto-accept edits / auto / plan, for a Claude Code or Note session.
+        if (chat.kind !== 'code') throw httpError(400, 'Only Claude Code and Note sessions have a permission mode.');
+        json(res, 200, code.setMode(chat, await readJson(req)));
         return true;
       case 'POST compact':
         startCompact(chat, await readJson(req));

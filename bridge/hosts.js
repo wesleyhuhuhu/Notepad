@@ -9,6 +9,11 @@
 // A code session's messages: the user's messages, and one assistant "turn" per message with
 // blocks: { type: 'text' | 'thinking', text }, { type: 'tool', id, name, input, ok, result },
 // and { type: 'permission', requestId, toolName, input, state: pending | allowed | denied | expired }.
+//
+// Note (the terminal agent, its own repo) also connects as a host, one per terminal ("terminal"
+// hosts). Its sessions start in the terminal, not from the website: it announces each one
+// (session_open) and the messages typed there (user_message), and its events name the session
+// (`session`) instead of a chat id. The website can watch, message, approve and stop them.
 
 const path = require('path');
 const fs = require('fs');
@@ -28,8 +33,14 @@ module.exports = function createHosts(d) {
     online: !!h.send,
     claude: h.claude,
     managed: h.managed,
+    terminal: !!h.terminal,
     lastSeen: h.lastSeen,
   });
+  const agentName = (chat) => (chat.origin === 'terminal' ? 'Note' : 'Claude Code');
+  // A session's permission mode: default = ask before changes and commands, acceptEdits = file
+  // changes in the folder are automatic, allowAll = commands too (Note: its own Auto mode),
+  // plan = plan only. The host applies it; it can change at any time.
+  const MODES = ['default', 'acceptEdits', 'allowAll', 'plan'];
   const list = () => [...hosts.values()].map(summary).sort((a, b) => (b.managed ? 1 : 0) - (a.managed ? 1 : 0) || a.name.localeCompare(b.name));
   const announce = () => chats.broadcastList({ type: 'hosts', hosts: list() });
 
@@ -46,6 +57,7 @@ module.exports = function createHosts(d) {
   async function validateNew(body) {
     const h = hosts.get(String(body.host || ''));
     if (!h) throw httpError(400, 'Pick a computer to run Claude Code on.');
+    if (h.terminal) throw httpError(400, 'Note sessions start in a terminal on that computer.');
     const cwd = typeof body.cwd === 'string' ? body.cwd : '';
     // On this PC, a project folder belongs to that project (its chats list, its CLAUDE.md).
     const project = h.managed ? d.projectForFolder(cwd) : null;
@@ -54,7 +66,7 @@ module.exports = function createHosts(d) {
     if (project && (await d.ensureProjectMd(project))) log(`Created a starter CLAUDE.md for project "${project}"`);
     return {
       title: `${path.basename(cwd) || cwd} · ${h.name}`,
-      fields: { host: h.id, hostName: h.name, cwd, project, permissionMode: ['acceptEdits', 'allowAll'].includes(body.permissionMode) ? body.permissionMode : 'default' },
+      fields: { host: h.id, hostName: h.name, cwd, project, permissionMode: MODES.includes(body.permissionMode) ? body.permissionMode : 'default' },
     };
   }
 
@@ -107,7 +119,7 @@ module.exports = function createHosts(d) {
   }
 
   async function message(chat, body) {
-    if (chat.run) throw httpError(409, 'Claude Code is still working in this session. Stop it first, or wait.');
+    if (chat.run) throw httpError(409, `${agentName(chat)} is still working in this session. Stop it first, or wait.`);
     const text = typeof body.content === 'string' ? body.content.trim().slice(0, 100000) : '';
     const att = attachments(body.attachments);
     if (!text && !att.shown.length) throw httpError(400, 'The message is empty.');
@@ -154,6 +166,27 @@ module.exports = function createHosts(d) {
     return { ok: true };
   }
 
+  function setMode(chat, body) {
+    const mode = String(body.mode || '');
+    if (!MODES.includes(mode)) throw httpError(400, `Unknown mode "${mode}". Use one of: ${MODES.join(', ')}.`);
+    try {
+      command(chat.host, { type: 'mode', chatId: chat.id, mode });
+    } catch (e) {
+      // A Claude Code session that isn't running picks the mode up with its next message.
+      if (chat.origin === 'terminal') throw e;
+    }
+    modeChanged(chat, mode);
+    return { ok: true, mode };
+  }
+
+  function modeChanged(chat, mode) {
+    // 'yolo' (Note, set in its terminal) is shown but can't be picked on the website.
+    if (![...MODES, 'yolo'].includes(mode) || chat.permissionMode === mode) return;
+    chat.permissionMode = mode;
+    chats.emit(chat, { type: 'mode', mode });
+    chats.saveSoon(chat);
+  }
+
   function end(chat) {
     try {
       command(chat.host, { type: 'end', chatId: chat.id });
@@ -170,9 +203,60 @@ module.exports = function createHosts(d) {
     if (chat.run) chats.endRun(chat, state, error);
   }
 
-  function apply(hostId, ev) {
-    const chat = chats.chats.get(ev.chatId);
+  // Note: a terminal session the website hasn't seen yet becomes a code chat.
+  async function openTerminalSession(hostId, ev) {
+    const h = hosts.get(hostId);
+    if (!h || !h.terminal || typeof ev.session !== 'string' || !ev.session) return;
+    if (sessionChat(hostId, ev.session)) return;
+    const cwd = typeof ev.cwd === 'string' ? ev.cwd : '';
+    const now = Date.now();
+    const chat = {
+      id: chats.newId(),
+      kind: 'code',
+      origin: 'terminal',
+      title: `${path.basename(cwd) || cwd || 'Terminal'} · ${h.name}`,
+      project: null,
+      createdAt: now,
+      updatedAt: now,
+      seq: 0,
+      messages: [],
+      host: hostId,
+      hostName: h.name,
+      cwd,
+      noteSession: ev.session,
+      permissionMode: 'default',
+    };
+    chats.chats.set(chat.id, chat);
+    await chats.saveNow(chat);
+    chats.listChanged(chat);
+    log(`Note session opened on "${h.name}" (${cwd})`);
+  }
+
+  function sessionChat(hostId, session) {
+    for (const c of chats.chats.values()) if (c.kind === 'code' && c.host === hostId && c.noteSession === session) return c;
+    return null;
+  }
+
+  // A message typed in a Note terminal (the website's own messages are added when sent).
+  function terminalMessage(chat, ev) {
+    if (chat.run) endTurn(chat, 'done');
+    const user = { id: chats.newId(), role: 'user', content: String(ev.text || '').slice(0, 100000), at: Date.now(), from: 'terminal' };
+    const turn = { id: chats.newId(), role: 'assistant', blocks: [], at: Date.now() };
+    chat.messages.push(user, turn);
+    chat.updatedAt = Date.now();
+    chats.emit(chat, { type: 'message', message: user });
+    chats.emit(chat, { type: 'message', message: turn });
+    chats.setRun(chat, { kind: 'turn', state: 'running', messageId: turn.id });
+    chats.saveSoon(chat);
+  }
+
+  async function apply(hostId, ev) {
+    if (ev.type === 'session_open') return openTerminalSession(hostId, ev);
+    const chat = ev.chatId ? chats.chats.get(ev.chatId) : sessionChat(hostId, String(ev.session || ''));
     if (!chat || chat.kind !== 'code' || chat.host !== hostId) return;
+    if (ev.type === 'user_message') return terminalMessage(chat, ev);
+    // The mode in effect on the host (it may also have been changed there, e.g. Shift+Tab in Note).
+    if (ev.type === 'mode') return modeChanged(chat, String(ev.mode || ''));
     const turn =
       (chat.run && chat.messages.find((m) => m.id === chat.run.messageId)) ||
       [...chat.messages].reverse().find((m) => m.role === 'assistant');
@@ -248,10 +332,15 @@ module.exports = function createHosts(d) {
         return;
       }
       case 'error':
-        endTurn(chat, 'error', String(ev.message || 'Claude Code failed.'));
+        endTurn(chat, 'error', String(ev.message || `${agentName(chat)} failed.`));
         return;
       case 'ended':
         if (chat.run) endTurn(chat, 'stopped', 'The session ended on its computer.');
+        if (chat.origin === 'terminal' && !chat.closed) {
+          chat.closed = true;
+          chats.saveSoon(chat);
+          chats.listChanged(chat);
+        }
         return;
       default:
         return;
@@ -261,7 +350,7 @@ module.exports = function createHosts(d) {
 
   function hostGone(h) {
     for (const chat of chats.chats.values())
-      if (chat.kind === 'code' && chat.host === h.id && chat.run) endTurn(chat, 'stopped', `"${h.name}" disconnected while Claude Code was working.`);
+      if (chat.kind === 'code' && chat.host === h.id && chat.run) endTurn(chat, 'stopped', `"${h.name}" disconnected while ${agentName(chat)} was working.`);
   }
 
   // ------------------------------------------------------------ routes --
@@ -289,6 +378,7 @@ module.exports = function createHosts(d) {
         folders: strs(b.folders, 400),
         claude: b.claude !== false,
         managed: !!b.managed,
+        terminal: !!b.terminal,
         lastSeen: Date.now(),
       });
       hosts.set(id, h);
@@ -315,7 +405,13 @@ module.exports = function createHosts(d) {
         announce();
         // Give it a moment to reconnect before giving up on running sessions.
         setTimeout(() => {
-          if (!h.send) hostGone(h);
+          if (h.send) return;
+          hostGone(h);
+          // A Note terminal that closed won't come back under this id: forget it (its sessions stay).
+          if (h.terminal && hosts.get(id) === h) {
+            hosts.delete(id);
+            announce();
+          }
         }, OFFLINE_GRACE_MS);
       });
       h.send = send;
@@ -330,7 +426,7 @@ module.exports = function createHosts(d) {
       h.lastSeen = Date.now();
       for (const ev of Array.isArray(b.events) ? b.events : []) {
         try {
-          apply(id, ev);
+          await apply(id, ev);
         } catch (e) {
           log(`Bad event from "${h.name}": ${e.message}`);
         }
@@ -388,7 +484,7 @@ module.exports = function createHosts(d) {
     run();
   }
 
-  const api = { list, validateNew, adoptExisting, message, stop, permission, end, handle, startLocalHost };
+  const api = { list, validateNew, adoptExisting, message, stop, permission, setMode, end, handle, startLocalHost };
   chats.setCode(api);
   return api;
 };

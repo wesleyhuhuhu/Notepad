@@ -192,7 +192,7 @@ async function startSession(chatId, cmd) {
     CLAUDE_AGENT_SDK_CLIENT_APP: 'local-llm-claude-remote/1.0',
   };
 
-  const s = { chatId, cwd, ctx, inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set() };
+  const s = { chatId, cwd, ctx, inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set(), mode: siteMode(cmd.permissionMode) };
   async function* input() {
     while (!s.closed) {
       while (s.inbox.length) yield s.inbox.shift();
@@ -214,16 +214,18 @@ async function startSession(chatId, cmd) {
       pathToClaudeCodeExecutable: CLAUDE,
       tools: ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write', 'WebFetch', 'WebSearch'],
       // default: ask before file changes and commands. acceptEdits: file changes in the folder are
-      // automatic. allowAll: commands too. Web searches and page reads never ask. Anything outside
-      // the session's folder still asks.
-      permissionMode: cmd.permissionMode === 'acceptEdits' || cmd.permissionMode === 'allowAll' ? 'acceptEdits' : 'default',
-      allowedTools: ['WebSearch', 'WebFetch', ...(cmd.permissionMode === 'allowAll' ? ['Bash'] : [])],
+      // automatic. allowAll: commands too (allowed in canUseTool, so the mode can change mid-session).
+      // plan: plan only. Web searches and page reads never ask. Anything outside the session's
+      // folder still asks.
+      permissionMode: sdkMode(s.mode),
+      allowedTools: ['WebSearch', 'WebFetch'],
       includePartialMessages: true,
       ...(cmd.resume ? { resume: cmd.resume } : {}),
       canUseTool: (toolName, toolInput, o) =>
         new Promise((resolve) => {
+          if (s.mode === 'allowAll' && !o.blockedPath) return resolve({ behavior: 'allow', updatedInput: toolInput });
           const requestId = o.toolUseID || Math.random().toString(36).slice(2);
-          s.perms.set(requestId, { resolve, input: toolInput, suggestions: o.suggestions || [] });
+          s.perms.set(requestId, { resolve, input: toolInput, suggestions: o.suggestions || [], blockedPath: o.blockedPath || null });
           send(chatId, { type: 'permission_request', requestId, toolName, input: short(toolInput, 4000), blockedPath: o.blockedPath || undefined });
           o.signal.addEventListener('abort', () => {
             if (s.perms.delete(requestId)) resolve({ behavior: 'deny', message: 'Cancelled.' });
@@ -404,13 +406,47 @@ function messageContent(s, cmd) {
   return [...images, { type: 'text', text: text || (images.length > 1 ? 'Here are some images.' : 'Here is an image.') }];
 }
 
+// The website's mode names (bridge/hosts.js) and the SDK's.
+function siteMode(m) {
+  return ['default', 'acceptEdits', 'allowAll', 'plan'].includes(m) ? m : 'default';
+}
+function sdkMode(m) {
+  return m === 'plan' ? 'plan' : m === 'acceptEdits' || m === 'allowAll' ? 'acceptEdits' : 'default';
+}
+
 async function handleCommand(cmd) {
   const id = cmd.chatId;
   try {
     switch (cmd.type) {
+      case 'mode': {
+        // Takes effect at once in a running session; otherwise with its next message (the
+        // bridge sends the saved mode along with it).
+        const s = sessions.get(id);
+        const mode = siteMode(cmd.mode);
+        if (s) {
+          s.mode = mode;
+          await s.q.setPermissionMode(sdkMode(mode));
+          // Commands already waiting for approval follow the new mode too.
+          if (mode === 'allowAll') {
+            for (const [rid, p] of s.perms) {
+              if (p.blockedPath) continue;
+              s.perms.delete(rid);
+              p.resolve({ behavior: 'allow', updatedInput: p.input });
+              send(id, { type: 'permission_resolved', requestId: rid, allow: true });
+            }
+          }
+        }
+        send(id, { type: 'mode', mode });
+        break;
+      }
       case 'message': {
         let s = sessions.get(id);
         if (!s) s = await startSession(id, cmd);
+        else if (cmd.permissionMode && siteMode(cmd.permissionMode) !== s.mode) {
+          // Changed on the website while this computer was offline.
+          s.mode = siteMode(cmd.permissionMode);
+          await s.q.setPermissionMode(sdkMode(s.mode)).catch(() => {});
+        }
         s.push(messageContent(s, cmd));
         break;
       }
