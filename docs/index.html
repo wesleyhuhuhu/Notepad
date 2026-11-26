@@ -280,6 +280,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
   header h1 { display: none; }
   #btnSide { order: 0; }
   #project, .where { order: 1; flex: 1 1 0; max-width: none; min-height: 38px; }
+  /* No room for both on a phone: the session's own bar shows its folder. */
+  .where { display: none; }
   header::after { content: ""; order: 2; flex-basis: 100%; height: 0; }
   .status { order: 3; flex: 1 1 0; }
   header .actions { order: 4; }
@@ -614,7 +616,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     sel.value = project;
   }
 
-  // Picking a project shows its chats and opens the most recent one (or a new chat).
+  // Picking a project shows its chats and opens the most recent one (or a new chat). Picked from
+  // inside a Claude Code or Note session, it always leaves the session for that project's chats.
   function switchProject(name, opts = {}) {
     project = name;
     mdScope = project ? 'project' : 'global';
@@ -623,8 +626,8 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     renderChatList();
     updateMdControls();
     if ($('mdpanel').classList.contains('open')) loadMd();
-    if (opts.keepChat || (chat && (chat.project || '') === project)) return;
-    const recent = chatList.find((c) => (c.project || '') === project);
+    if (opts.keepChat || (chat && chat.kind !== 'code' && (chat.project || '') === project)) return;
+    const recent = chatList.filter((c) => c.kind !== 'code' && (c.project || '') === project).sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (recent) openChat(recent.id);
     else newChat();
   }
@@ -651,10 +654,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     const box = $('chatList');
     box.textContent = '';
     const byTime = (a, b) => b.updatedAt - a.updatedAt;
-    // Sessions in a project folder are listed with that project; the rest (other folders and computers) on their own.
-    const code = chatList.filter((c) => c.kind === 'code' && !c.project && c.origin !== 'terminal').sort(byTime);
+    // Every session is always listed, whatever project is picked; the project list below holds its chats.
+    const code = chatList.filter((c) => c.kind === 'code' && c.origin !== 'terminal').sort(byTime);
     const note = chatList.filter((c) => c.kind === 'code' && c.origin === 'terminal').sort(byTime);
-    const items = chatList.filter((c) => (c.project || '') === project && c.origin !== 'terminal').sort(byTime);
+    const items = chatList.filter((c) => c.kind !== 'code' && (c.project || '') === project).sort(byTime);
     const section = (text) => { const h = div('side-sec'); h.textContent = text; box.appendChild(h); };
     // Note sessions are started in a terminal on some computer (the Note app); they're listed on their own.
     if (note.length) {
@@ -684,9 +687,10 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     st.title = { approval: 'Waiting for your approval', running: 'Working…', queued: 'Waiting for the model', unseen: 'Finished', error: 'Ended with an error' }[k] || '';
     const t = div('t');
     t.textContent = c.title || 'New chat';
+    // A session in one of the PC's project folders shows which project it belongs to.
     if (c.kind === 'code' && c.project) {
       const tag = div('tag');
-      tag.textContent = 'Claude Code';
+      tag.textContent = c.project;
       t.prepend(tag);
     }
     t.title = c.title || '';
@@ -1746,7 +1750,9 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
     document.body.classList.toggle('code-mode', code);
     $('input').placeholder = code ? `Tell ${chat.origin === 'terminal' ? 'Note' : 'Claude Code'} what to do…` : 'Message your local model…';
     // In a Claude Code session the header shows its folder instead of the project menu.
-    $('project').hidden = code;
+    // The project menu stays available in a session, so you can switch to a project's chats
+    // directly; the session's folder is shown next to it (and in the session's own bar).
+    $('project').hidden = false;
     $('where').hidden = !code;
     if (code) {
       const h = hostOf(chat.host);
