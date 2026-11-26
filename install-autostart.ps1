@@ -20,8 +20,11 @@ if ($Remove) {
 }
 
 $script = Join-Path $root 'autostart.ps1'
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`"" -WorkingDirectory $root
+# Run it in a headless console: when Windows Terminal is the default terminal app (the Windows 11
+# default), "-WindowStyle Hidden" still leaves an empty Terminal window open, and closing that
+# window would stop the bridge.
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' `
+  -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`"" -WorkingDirectory $root
 $atLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 # Every 5 minutes as well: while the bridge runs, these are skipped (IgnoreNew); if it has ended
 # for any reason, the next one starts it again.
