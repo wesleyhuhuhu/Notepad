@@ -81,7 +81,7 @@ The context meter under the message box shows how much of the model's context th
 
 Compaction works like Claude Code's:
 
-- **Automatic:** when a chat passes 70% of the context (`compactAt` in `config.json`), the bridge has the model write a structured summary of the older messages. The summary covers goal and requests, key facts and decisions, files and code, problems and fixes, current state, next steps and progress. It replaces those messages. The newest few messages are kept word for word. Thinking is switched off for the summary so it fits in the room that's left. Very long chats are summarized in parts.
+- **Automatic:** when a chat passes 80% of the context (`compactAt` in `config.json`), the bridge has the model write a structured summary of the older messages. The summary covers goal and requests, key facts and decisions, files and code, problems and fixes, current state, next steps and progress. It replaces those messages. The newest few messages are kept word for word. Thinking is switched off for the summary so it fits in the room that's left. Very long chats are summarized in parts.
 - **Manual:** the **Compact** button summarizes the whole chat now, like `/compact`, with an optional "focus on…" note.
 - **What happens to the chat:** compacted messages stay visible but faded, and are no longer sent. A "Context compacted" marker shows the summary, which you can expand.
 - **CLAUDE.md:** CLAUDE.md files are re-read on every message, so compaction never loses them. In a project, each compaction also writes the summary's **Progress** section into that project's CLAUDE.md, so even a brand-new chat starts from it. A backup is kept, and you can untick this in the Compact dialog.
@@ -90,7 +90,7 @@ Measured on the RTX 5070 Ti: a ~40k-token chat compacted to about 2k tokens in r
 
 Compaction keeps a long chat going, but it can't help a single message that's too big. A message that fills most of the context, like a 90k-token paste into 96k, leaves almost no room. Put big documents in the project folder instead; the model searches them and reads only the parts it needs.
 
-Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.6` compacts earlier.
+Settings in `config.json`: `"autoCompact": false` turns automatic compaction off; `"compactAt": 0.7` compacts earlier.
 
 ## Chats live on your PC
 

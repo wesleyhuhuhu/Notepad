@@ -46,7 +46,7 @@ const DEFAULTS = {
   // Compaction: when a chat passes this share of the model's context, the older part is
   // summarized (like Claude Code's auto-compact) so the chat can keep going.
   autoCompact: true,
-  compactAt: 0.7,
+  compactAt: 0.8,
   // Claude Code sessions from the website: this PC starts host/claude-remote.mjs for its projects folder.
   codeHost: true,
   codeHostName: '',

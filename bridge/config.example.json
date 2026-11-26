@@ -14,7 +14,7 @@
   "maxBackups": 50,
   "contextLength": 0,
   "autoCompact": true,
-  "compactAt": 0.7,
+  "compactAt": 0.8,
   "webSearchProvider": "exa",
   "exaApiKey": "",
   "webSearchType": "auto",
