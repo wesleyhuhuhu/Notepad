@@ -271,11 +271,20 @@ async function retire(s) {
 }
 
 // Live progress for one model call: reading the prompt, then thinking or writing, with tokens/s.
+// LM Studio holds a tool call back until it is complete, so the model can be busy for a while with
+// nothing arriving. After QUIET_MS without a token the phase becomes 'quiet' (not 'writing'), and
+// when the call ends the phase becomes 'done' so the website stops showing it.
+const QUIET_MS = 3000;
 function genStart(s) {
   genEnd(s);
   s.g = { phase: 'reading', t0: Date.now(), tFirst: 0, tLast: 0, n: 0, thinking: 0, last: 0 };
   genSend(s, true);
-  s.g.timer = setInterval(() => { if (s.g && !s.g.tFirst) genSend(s, true); }, 1000);
+  s.g.timer = setInterval(() => {
+    const g = s.g;
+    if (!g) return;
+    if (!g.tFirst) genSend(s, true);
+    else if (Date.now() - g.tLast >= QUIET_MS) { g.phase = 'quiet'; genSend(s, true); }
+  }, 1000);
 }
 function genToken(s, thinking) {
   if (!s.g) genStart(s);
@@ -292,7 +301,8 @@ function genSend(s, force) {
   const now = Date.now();
   if (!g || (!force && now - g.last < 500)) return;
   g.last = now;
-  const secs = g.tFirst ? (now - g.tFirst) / 1000 : 0;
+  // The rate covers only the time tokens were arriving, so a pause doesn't drag it toward zero.
+  const secs = g.tFirst ? (g.tLast - g.tFirst) / 1000 : 0;
   send(s.chatId, {
     type: 'gen',
     phase: g.phase,
@@ -300,6 +310,7 @@ function genSend(s, force) {
     thinking: g.thinking,
     tps: secs > 0.5 ? Math.round((g.n / secs) * 10) / 10 : 0,
     waited: Math.round((now - g.t0) / 100) / 10,
+    quiet: g.tFirst ? Math.round((now - g.tLast) / 1000) : 0,
   });
 }
 function genEnd(s) {
@@ -307,6 +318,7 @@ function genEnd(s) {
   if (!g) return;
   clearInterval(g.timer);
   s.g = null;
+  send(s.chatId, { type: 'gen', phase: 'done', tokens: g.n, thinking: g.thinking });
   const t = s.turn || (s.turn = { tokens: 0, thinking: 0, genSeconds: 0, ttft: null, calls: 0 });
   t.calls++;
   t.tokens += g.n;

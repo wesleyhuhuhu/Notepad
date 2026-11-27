@@ -168,6 +168,7 @@ header .actions { display: flex; gap: 4px; margin-left: auto; flex: none; }
   border: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
   max-width: 82%; white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.msg.user .when { color: var(--muted); font-size: 12px; margin: 5px 6px 0 0; font-variant-numeric: tabular-nums; }
 .msg.assistant .body { overflow-wrap: anywhere; }
 .body { line-height: 1.7; }
 .body > :first-child { margin-top: 0; } .body > :last-child { margin-bottom: 0; }
@@ -1463,7 +1464,10 @@ dialog .row { margin-top: 22px; }
     if (!g) return '';
     if (g.phase === 'reading') return `Reading the prompt${g.prompt ? ` (~${kTok(g.prompt)} tokens)` : ''} · ${Math.round(g.waited || 0)} s`;
     const rate = g.tps ? ` · ${g.tps.toFixed(1)} tok/s` : '';
+    if (g.phase === 'done') return '';
     if (g.phase === 'thinking') return `Thinking · ${num(g.tokens)} tokens${rate}`;
+    // No token for a few seconds: usually a tool call, which LM Studio sends only once it's complete.
+    if (g.phase === 'quiet') return `Working · ${num(g.tokens)} tokens${rate} · nothing new for ${Math.round(g.quiet || 0)} s`;
     return `Writing · ${num(g.tokens)} tokens${g.thinking ? ` (${num(g.thinking)} thinking)` : ''}${rate}`;
   }
   // Stats under a finished reply.
@@ -1477,6 +1481,24 @@ dialog .row { margin-top: 22px; }
     return parts.join(' · ');
   }
   const kTok = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(Math.round(n || 0)));
+
+  // "5 minutes ago" under a sent message; the exact time is in its tooltip.
+  function timeAgo(at) {
+    const s = Math.max(0, (Date.now() - at) / 1000);
+    const plural = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+    if (s < 45) return 'Just now';
+    if (s < 3600) return plural(Math.max(1, Math.round(s / 60)), 'minute');
+    if (s < 86400) return plural(Math.floor(s / 3600), 'hour');
+    if (s < 7 * 86400) return plural(Math.floor(s / 86400), 'day');
+    const d = new Date(at);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(d.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' } : {}) });
+  }
+  setInterval(() => {
+    for (const w of document.querySelectorAll('.msg.user .when')) {
+      const t = timeAgo(Number(w.dataset.at));
+      if (w.textContent !== t) w.textContent = t;
+    }
+  }, 30000);
 
   function msgEl(m, streaming) {
     const el = document.createElement('div');
@@ -1502,6 +1524,13 @@ dialog .row { margin-top: 22px; }
       }
       if (m.content) b.appendChild(document.createTextNode(m.content));
       el.appendChild(b);
+      if (m.at) {
+        const w = div('when');
+        w.dataset.at = m.at;
+        w.title = new Date(m.at).toLocaleString();
+        w.textContent = timeAgo(m.at);
+        el.appendChild(w);
+      }
     } else if (m.blocks) renderCodeTurn(el, m, streaming);
     else renderAssistant(el, m, streaming);
     return el;
@@ -1591,8 +1620,12 @@ dialog .row { margin-top: 22px; }
       const m = chat.run.messageId ? byId(chat.run.messageId) : null;
       if (chat.run.kind === 'compact') text = 'Compacting the conversation…';
       else if (m && m.blocks) {
-        text = m.notice || (m.blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : genText(m.gen) || 'Working…');
-      } else if (m) text = m.notice || genText(m.gen) || (chat.run.state === 'queued' ? 'Waiting for the model…' : 'Starting…');
+        const tool = [...m.blocks].reverse().find((b) => b.type === 'tool' && b.ok === undefined);
+        text = m.notice || (m.blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : genText(m.gen) || (tool ? `Running ${tool.name}…` : 'Working…'));
+      } else if (m) {
+        const tool = [...(m.tools || [])].reverse().find((t) => t.ok === undefined);
+        text = m.notice || genText(m.gen) || (tool ? `Running ${tool.name}…` : chat.run.state === 'queued' ? 'Waiting for the model…' : m.gen ? 'Working…' : 'Starting…');
+      }
     }
     bar.hidden = !text;
     if (text && bar.textContent !== text) bar.textContent = text;

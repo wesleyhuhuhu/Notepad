@@ -937,7 +937,8 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
     if (!force && now - lastGen < 500) return;
     lastGen = now;
     const n = thinkingN + writingN;
-    const secs = tFirst ? (now - tFirst) / 1000 : 0;
+    // Only the time tokens were arriving counts, so a pause doesn't drag the rate toward zero.
+    const secs = tFirst ? (tLast - tFirst) / 1000 : 0;
     send({
       type: 'gen',
       phase,
@@ -945,11 +946,17 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
       thinking: thinkingN,
       tps: secs > 0.5 ? Math.round((n / secs) * 10) / 10 : 0,
       waited: Math.round((now - t0) / 100) / 10,
+      quiet: tFirst ? Math.round((now - tLast) / 1000) : 0,
       prompt: promptEstimate || undefined,
     });
   };
   gen('reading', true);
-  const readingTimer = setInterval(() => { if (!tFirst) gen('reading', true); }, 1000);
+  // Before the first token: 'reading'. After 3 s with no token (LM Studio holds a tool call back
+  // until it is complete): 'quiet', so the website doesn't keep saying "writing".
+  const readingTimer = setInterval(() => {
+    if (!tFirst) gen('reading', true);
+    else if (Date.now() - tLast >= 3000) gen('quiet', true);
+  }, 1000);
   try {
   const r = await fetch(baseUrl(payload.model) + '/v1/chat/completions', {
     method: 'POST',
@@ -1029,6 +1036,8 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
   return { content, usage, toolCalls: calls.filter((c) => c && c.name), timing };
   } finally {
     clearInterval(readingTimer);
+    // The call is over (tools may run next): stop showing it as reading or writing.
+    send({ type: 'gen', phase: 'done', tokens: thinkingN + writingN, thinking: thinkingN });
   }
 }
 

@@ -396,7 +396,7 @@ module.exports = function createHosts(d) {
         out.ctx = turn.ctx;
         break;
       case 'gen':
-        chats.live(chat, { type: 'gen', id: turn.id, phase: ev.phase, tokens: ev.tokens, thinking: ev.thinking, tps: ev.tps, waited: ev.waited });
+        chats.live(chat, { type: 'gen', id: turn.id, phase: ev.phase, tokens: ev.tokens, thinking: ev.thinking, tps: ev.tps, waited: ev.waited, quiet: ev.quiet });
         return;
       case 'result': {
         const stopping = !!(chat.run && chat.run.stopping);
