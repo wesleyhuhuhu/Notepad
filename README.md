@@ -229,6 +229,10 @@ By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which 
 | 90k | 15,270 MiB | images up to 1600 px work, peaking at 15,608 MiB |
 | **88k** | 15,208 MiB | images up to 1600 px work, peaking at 15,546 MiB; also at the end of an 87k-token prompt, and with 3 images in one message |
 
+**Sampling (saved in the same LM Studio settings file, under `operation`):** Qwen's values for thinking are temperature 0.6, top-k 20, top-p 0.95, min-p 0 and repeat penalty off, plus a **presence penalty of 1.5** (`llm.prediction.llama.presencePenalty`, added 2026-11-27). The penalty makes words already used less likely, which stops long thinking from looping on the same list. A Claude Code turn did exactly that, repeating the same list of names for thousands of tokens. Claude Code sends no sampling settings, so these saved ones apply. LM Studio ignores a `presence_penalty` sent in a Claude-format request, though it honors one in OpenAI format.
+- Checked with "write *apple* 60 times" at temperature 0: 61 → 56 with the saved penalty (at 2.0), so it applies to Claude-format requests.
+- At 1.5 the 27B still passed the same 8 of 9 checks, and wrote working code with thinking on.
+
 The bridge shrinks bigger images to 1600 px on the long side before they reach the model (`bridge/images.js`, using Windows' own image library). The website already sends them at 1280 px or less. So 88k is safe for screenshots of any size, with ~150 MiB to spare.
 
 Older measurements, from before the 6800 XT took over the display, with the earlier model (`qwen3.8-27b-heretic-gsq-rco`) and a q8_0 key / q4_0 value cache:
