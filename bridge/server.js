@@ -98,6 +98,7 @@ function loadConfig() {
 const cfg = loadConfig();
 const second = require('./second-model')(cfg, log);
 const { shrinkImages } = require('./images');
+const { loopWatcher, LOOP_NOTE } = require('./loops');
 // Where requests for `model` go: the second model's llama-server, or LM Studio.
 const baseUrl = (model) => (second.has(model) ? second.url : cfg.lmStudioUrl);
 
@@ -974,6 +975,8 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
   let content = '';
   let usage = null;
   const calls = [];
+  const watch = loopWatcher();
+  let looped = null;
 
   const handleLine = (line) => {
     line = line.trim();
@@ -1000,12 +1003,14 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
       thinkingN++;
       send({ type: 'reasoning', text: reasoning });
       gen('thinking');
+      if (!looped) looped = watch.add('thinking', reasoning);
     }
     if (d.content) {
       content += d.content;
       writingN++;
       send({ type: 'token', text: d.content });
       gen('writing');
+      if (!looped) looped = watch.add('text', d.content);
     }
     if (Array.isArray(d.tool_calls)) {
       for (const t of d.tool_calls) {
@@ -1022,12 +1027,20 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
   for await (const chunk of r.body) {
     buf += dec.decode(chunk, { stream: true });
     let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
+    while (!looped && (i = buf.indexOf('\n')) >= 0) {
       handleLine(buf.slice(0, i));
       buf = buf.slice(i + 1);
     }
+    if (looped) break; // leaving the loop closes the connection, which stops LM Studio
   }
-  if (buf) handleLine(buf);
+  if (looped) {
+    // Stopped mid-loop (bridge/loops.js): say so in the reply, and run no half-made tool calls.
+    const note = (content && !content.endsWith('\n') ? '\n\n' : '') + `*${LOOP_NOTE}*`;
+    content += note;
+    send({ type: 'token', text: note });
+    calls.length = 0;
+    log(`Chat: stopped a loop (the same ~${looped.unit}-character passage ${looped.repeats} times, after ~${Math.round(watch.chars / 4)} tokens)`);
+  } else if (buf) handleLine(buf);
 
   const timing = {
     ttft: tFirst ? (tFirst - t0) / 1000 : null,
@@ -1579,17 +1592,48 @@ async function handleAnthropic(req, res, route) {
     } catch {}
     return res.end(text);
   }
-  // A stream: pass it on line by line, correcting the usage in message_start / message_delta.
+  // A stream: pass it on line by line, correcting the usage in message_start / message_delta and
+  // watching the thinking and text for a loop (bridge/loops.js).
+  const watch = loopWatcher();
+  let openIndex = -1;
+  let maxIndex = -1;
+  let looped = null;
   const fixLine = (line) => {
-    if (!line.startsWith('data:') || !line.includes('"usage"')) return line;
+    if (!line.startsWith('data:')) return line;
+    let ev;
     try {
-      const ev = JSON.parse(line.slice(5));
-      const a = fixAnthropicUsage(ev.message && ev.message.usage, promptEstimate);
-      const b = fixAnthropicUsage(ev.usage, promptEstimate);
-      return a || b ? 'data: ' + JSON.stringify(ev) : line;
+      ev = JSON.parse(line.slice(5));
     } catch {
       return line;
     }
+    if (ev.type === 'content_block_start') {
+      openIndex = ev.index;
+      maxIndex = Math.max(maxIndex, ev.index);
+    } else if (ev.type === 'content_block_stop') {
+      if (openIndex === ev.index) openIndex = -1;
+    } else if (ev.type === 'content_block_delta' && ev.delta && !looped) {
+      const d = ev.delta;
+      const piece = d.type === 'thinking_delta' ? d.thinking : d.type === 'text_delta' ? d.text : '';
+      if (piece) looped = watch.add(ev.index, piece);
+    }
+    if (!line.includes('"usage"')) return line;
+    const a = fixAnthropicUsage(ev.message && ev.message.usage, promptEstimate);
+    const b = fixAnthropicUsage(ev.usage, promptEstimate);
+    return a || b ? 'data: ' + JSON.stringify(ev) : line;
+  };
+  // Ends the reply cleanly after a loop: closes the open block, adds a note, and stops.
+  const endLooped = () => {
+    const sse = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    let out = '\n';
+    if (openIndex >= 0) out += sse('content_block_stop', { index: openIndex });
+    const i = maxIndex + 1;
+    out += sse('content_block_start', { index: i, content_block: { type: 'text', text: '' } });
+    out += sse('content_block_delta', { index: i, delta: { type: 'text_delta', text: LOOP_NOTE } });
+    out += sse('content_block_stop', { index: i });
+    out += sse('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: Math.round(watch.chars / 4) } });
+    out += sse('message_stop', {});
+    res.end(out);
+    log(`Claude Code: stopped a loop (the same ~${looped.unit}-character passage ${looped.repeats} times, after ~${Math.round(watch.chars / 4)} tokens)`);
   };
   const dec = new TextDecoder();
   let buf = '';
@@ -1598,12 +1642,23 @@ async function handleAnthropic(req, res, route) {
       buf += dec.decode(chunk, { stream: true });
       const cut = buf.lastIndexOf('\n') + 1;
       if (cut > 0) {
-        res.write(buf.slice(0, cut).split('\n').map(fixLine).join('\n'));
+        const lines = buf.slice(0, cut - 1).split('\n');
         buf = buf.slice(cut);
+        const out = [];
+        for (const line of lines) {
+          out.push(fixLine(line));
+          if (looped) break;
+        }
+        res.write(out.join('\n') + '\n');
+        if (looped) break;
       }
     }
   } catch (e) {
     if (!ac.signal.aborted) log('Claude Code stream error: ' + e.message);
+  }
+  if (looped) {
+    ac.abort(); // LM Studio stops generating when the connection closes
+    return endLooped();
   }
   res.end(buf ? fixLine(buf + dec.decode()) : dec.decode());
 }
@@ -1683,7 +1738,22 @@ async function handleNoteChat(req, res) {
     'Cache-Control': 'no-cache, no-transform',
     'X-Accel-Buffering': 'no',
   });
-  // Rename the model line by line, so a name split across two chunks is still caught.
+  // Rename the model line by line, so a name split across two chunks is still caught, and watch
+  // the thinking and text for a loop (bridge/loops.js).
+  const watch = loopWatcher();
+  let looped = null;
+  let lastId = '';
+  const check = (line) => {
+    if (looped || !line.startsWith('data:') || line.includes('[DONE]')) return;
+    try {
+      const j = JSON.parse(line.slice(5));
+      if (j.id) lastId = j.id;
+      const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
+      const r = d.reasoning_content || d.reasoning;
+      if (r) looped = watch.add('thinking', r);
+      if (!looped && d.content) looped = watch.add('text', d.content);
+    } catch {}
+  };
   const dec = new TextDecoder();
   let buf = '';
   try {
@@ -1691,12 +1761,28 @@ async function handleNoteChat(req, res) {
       buf += dec.decode(chunk, { stream: true });
       const cut = buf.lastIndexOf('\n') + 1;
       if (cut > 0) {
-        res.write(rename(buf.slice(0, cut)));
+        const lines = buf.slice(0, cut - 1).split('\n');
         buf = buf.slice(cut);
+        const out = [];
+        for (const line of lines) {
+          out.push(line);
+          check(line);
+          if (looped) break;
+        }
+        res.write(rename(out.join('\n') + '\n'));
+        if (looped) break;
       }
     }
   } catch (e) {
     if (!ac.signal.aborted) log('Note stream error: ' + e.message);
+  }
+  if (looped) {
+    ac.abort(); // LM Studio stops generating when the connection closes
+    const chunk = (delta, finish) =>
+      'data: ' + JSON.stringify({ id: lastId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: alias, choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n';
+    res.end('\n' + chunk({ content: `\n\n${LOOP_NOTE}` }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
+    log(`Note: stopped a loop (the same ~${looped.unit}-character passage ${looped.repeats} times, after ~${Math.round(watch.chars / 4)} tokens)`);
+    return;
   }
   res.end(rename(buf + dec.decode()));
 }
