@@ -254,16 +254,16 @@ The RTX 5070 Ti runs the 27B in LM Studio; the RX 6800 XT (which drives the scre
 
 - **What runs:** `Qwen3.8-9B-heretic-uncensored` Q6_K ([mradermacher's GGUF](https://huggingface.co/mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF)) with a 64k context, in llama.cpp's own `llama-server` (Vulkan build). LM Studio can't serve it: it runs one GGUF engine at a time, and that one is CUDA, which only sees the NVIDIA card.
 - **Where:** `amd\llama.cpp\` (the [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) `llama-bXXXXX-bin-win-vulkan-x64.zip`, unzipped) and `amd\models\`. The `amd` folder isn't in git.
-- **How it starts:** the bridge starts it (hidden, port 1235, local only) and checks it every 30 s, starting it again if it stops; a server already running from an earlier bridge is reused. Its output goes to `bridge\logs\second-model.log`. The card is found by name (`"gpu": "6800 XT"`), so device numbering doesn't matter.
+- **How it starts:** the bridge starts it (hidden, port 1235, local only) and checks it every 30 s, starting it again if it stops. Restarting the bridge restarts it too (~20 s to load); one that's already running is reused. Its output goes to `bridge\logs\second-model.log`. The card is found by name (`"gpu": "6800 XT"`), so device numbering doesn't matter.
 - **Using it:**
   - **Website:** pick `qwen3.8-9b-heretic` in **Model**. Chats on the two models run at the same time; chats on the same model take turns.
   - **Note:** `note setup` (version 0.28.5 or newer) adds a second model, **Lite**; switch with `/model`. Note calls it `note-lite` and never sees the real name.
-  - **Claude Code** (`claude-local` and website sessions) keeps using the 27B.
+  - **Claude Code sessions on the website:** pick the model in the session bar, next to the permission mode, or type `/model 9b` (`/model default` goes back). Claude Code fixes its model and context size when it starts, so the switch restarts the session's Claude Code on the new model with your next message and resumes the same conversation. If the conversation is past the point where Claude Code would compact on the new model (its context − ~23k), it's compacted first on the current model, shown as a `/compact` turn, and the switch happens when that finishes. For the 9B that point is ~42k tokens. To know the conversation's real size, each session tags its model calls (an `x-local-llm-chat` header) and the bridge records the size of the last one. `claude-local` in a terminal keeps using the 27B.
   - It can't see images (no vision file).
 - **Measured on the 6800 XT:**
   - **VRAM:** ~9.5 GB. The desktop takes ~1 GB, so ~5.5 GB is left for a game (CS2 used ~3.3 GB in its menu).
   - **Speed:** ~60 tokens/s on a short chat, ~47 tokens/s at 23k tokens; reading the prompt runs at ~800 tokens/s.
-  - Running it while you play takes GPU time from the game, so expect lower FPS during a reply.
+  - **While a game runs on the same card, they compete.** Measured with CS2 open: the 9B read a long prompt at only 80–130 tokens/s, and the game loses frames while the 9B works. Short replies are fine; leave long prompts for when you're not playing. Capping the game's FPS leaves more room.
 - **Settings found by testing:**
   - Flash attention and a q8_0 KV cache both cut prompt reading on this card to 100–250 tokens/s at 20k+ tokens, so both are off.
   - A 256-token batch saves ~1 GB at 64k for ~7% slower prompt reading.

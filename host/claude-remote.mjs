@@ -154,8 +154,10 @@ function toolResultText(content) {
   return '';
 }
 
-async function modelInfo() {
-  const r = await fetch(`${BRIDGE}/api/claude-code?load=1`, { headers: H, signal: AbortSignal.timeout(240000) });
+// The model to run (the bridge's default if none is given) and its context size.
+async function modelInfo(requested) {
+  const q = requested ? `&model=${encodeURIComponent(requested)}` : '';
+  const r = await fetch(`${BRIDGE}/api/claude-code?load=1${q}`, { headers: H, signal: AbortSignal.timeout(240000) });
   if (!r.ok) throw new Error(`The bridge returned ${r.status} when asked for the model.`);
   const text = await r.text();
   const model = (/^MODEL=(.*)$/m.exec(text) || [])[1];
@@ -167,7 +169,7 @@ async function modelInfo() {
 async function startSession(chatId, cmd) {
   const cwd = insideRoots(cmd.cwd);
   if (!cwd) throw new Error(`"${cmd.cwd}" is not inside the folders this computer allows (${ROOTS.join(', ')}).`);
-  const { model, ctx } = await modelInfo();
+  const { model, ctx } = await modelInfo(cmd.model);
   // Claude Code auto-compacts at (declared context − reply cap − ~13k it reserves). Telling it the
   // window is a little larger than the model's real `ctx` shrinks that reserve, so sessions compact
   // later — without loading more, so no speed or VRAM cost. The real limit is still `ctx`, so a turn
@@ -190,9 +192,14 @@ async function startSession(chatId, cmd) {
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: '16384',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: 'local-llm-claude-remote/1.0',
+    // Tags this session's model calls, so the bridge knows how big its conversation is (it
+    // compacts before switching to a model with a smaller context).
+    ANTHROPIC_CUSTOM_HEADERS: `x-local-llm-chat: ${chatId}`,
   };
 
-  const s = { chatId, cwd, ctx, inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set(), mode: siteMode(cmd.permissionMode) };
+  // `requested` is the model the website picked ('' = the bridge's default); a different one
+  // means a restart (Claude Code fixes the model and context size when it starts).
+  const s = { chatId, cwd, ctx, model, requested: cmd.model || '', inbox: [], wake: null, perms: new Map(), q: null, closed: false, deltas: new Set(), mode: siteMode(cmd.permissionMode) };
   async function* input() {
     while (!s.closed) {
       while (s.inbox.length) yield s.inbox.shift();
@@ -234,16 +241,31 @@ async function startSession(chatId, cmd) {
     },
   });
   sessions.set(chatId, s);
-  pump(s).catch((e) => {
+  s.done = pump(s).catch((e) => {
+    if (s.retired) return; // closed on purpose to switch models
     log(`Session ${chatId} failed: ${e.message}`);
     send(chatId, { type: 'error', message: e.message });
   }).finally(() => {
     s.closed = true;
-    sessions.delete(chatId);
-    send(chatId, { type: 'ended' });
+    if (sessions.get(chatId) === s) sessions.delete(chatId);
+    // A session closed to switch models carries on in its replacement: nothing ended.
+    if (!s.retired) send(chatId, { type: 'ended' });
   });
-  log(`Session ${chatId} started in ${cwd}${cmd.resume ? ' (resumed)' : ''}`);
+  log(`Session ${chatId} started in ${cwd} on ${model} (${ctx} context)${cmd.resume ? ' (resumed)' : ''}`);
   return s;
+}
+
+// Closes a session so the next message resumes it on another model; waits (up to 15 s) for its
+// Claude Code process to finish, so two never write the same conversation.
+async function retire(s) {
+  if (s.closed && !s.retired) return;
+  s.retired = true;
+  s.closed = true;
+  if (s.wake) s.wake();
+  try {
+    s.q.close?.();
+  } catch {}
+  await Promise.race([s.done, sleep(15000)]);
 }
 
 // Live progress for one model call: reading the prompt, then thinking or writing, with tokens/s.
@@ -305,7 +327,10 @@ async function pump(s) {
           genStart(s);
         } else if (m.subtype === 'status' && m.status) send(id, { type: 'status', text: String(m.status) });
         else if (m.subtype === 'api_retry') send(id, { type: 'status', text: `Retrying the model (attempt ${m.attempt})…` });
-        else if (m.subtype === 'compact_boundary') send(id, { type: 'status', text: 'Compacted the conversation to free up context.' });
+        else if (m.subtype === 'compact_boundary') {
+          send(id, { type: 'status', text: 'Compacted the conversation to free up context.' });
+          send(id, { type: 'compacted' });
+        }
         break;
       case 'stream_event': {
         const e = m.event;
@@ -439,8 +464,22 @@ async function handleCommand(cmd) {
         send(id, { type: 'mode', mode });
         break;
       }
+      case 'model': {
+        // Switched on the website: the next message restarts the session on the new model.
+        const s = sessions.get(id);
+        if (s && s.requested !== (cmd.model || '')) {
+          await retire(s);
+          log(`Session ${id}: switching to ${cmd.model || 'the default model'} with the next message`);
+        }
+        break;
+      }
       case 'message': {
         let s = sessions.get(id);
+        // The model was changed while this computer was offline, or a switch is in progress.
+        if (s && (s.retired || s.requested !== (cmd.model || ''))) {
+          await retire(s);
+          s = null;
+        }
         if (!s) s = await startSession(id, cmd);
         else if (cmd.permissionMode && siteMode(cmd.permissionMode) !== s.mode) {
           // Changed on the website while this computer was offline.

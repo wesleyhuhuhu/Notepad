@@ -576,7 +576,7 @@ module.exports = function createChats(d) {
         return true;
       }
     }
-    const m = /^\/api\/chats\/([a-z0-9]+)(?:\/(messages|stop|compact|stream|permission|mode))?$/.exec(p);
+    const m = /^\/api\/chats\/([a-z0-9]+)(?:\/(messages|stop|compact|stream|permission|mode|model))?$/.exec(p);
     if (!m) return false;
     const chat = getChat(m[1]);
     const action = `${req.method} ${m[2] || ''}`;
@@ -614,6 +614,11 @@ module.exports = function createChats(d) {
         // Ask / auto-accept edits / auto / plan, for a Claude Code or Note session.
         if (chat.kind !== 'code') throw httpError(400, 'Only Claude Code and Note sessions have a permission mode.');
         json(res, 200, code.setMode(chat, await readJson(req)));
+        return true;
+      case 'POST model':
+        // A Claude Code session's model (compacts first if the chat won't fit the new one).
+        if (chat.kind !== 'code') throw httpError(400, 'Only Claude Code sessions switch models this way; chats use the Model menu.');
+        json(res, 200, await code.setModel(chat, await readJson(req)));
         return true;
       case 'POST compact':
         startCompact(chat, await readJson(req));

@@ -1174,6 +1174,12 @@ dialog .row { margin-top: 22px; }
         chat.permissionMode = ev.mode;
         refreshCodeBar();
         return;
+      case 'model':
+        // A Claude Code session's model; `pending` while it compacts before switching.
+        chat.model = ev.model || undefined;
+        chat.pendingModel = 'pending' in ev ? { model: ev.pending } : undefined;
+        refreshCodeBar();
+        return;
       default: {
         const m = byId(ev.id);
         if (!m) return;
@@ -1825,12 +1831,14 @@ dialog .row { margin-top: 22px; }
   const COMMANDS = [
     { name: 'compact', args: '[focus]', help: 'Summarize the conversation so far to free up context', where: 'both' },
     { name: 'mode', args: '[ask|edits|auto|plan]', help: 'Set the session\'s permission mode', where: 'code' },
+    { name: 'model', args: '[name|default]', help: 'Switch this Claude Code session\'s model (compacts first if needed)', where: 'claude' },
     { name: 'new', args: '', help: 'Start a new chat (in a session: a new session)', where: 'both' },
     { name: 'stop', args: '', help: 'Stop the reply or turn in progress', where: 'both' },
     { name: 'help', args: '', help: 'Show these commands', where: 'both' },
   ];
   const MODE_WORDS = { ask: 'default', default: 'default', edits: 'acceptEdits', 'accept-edits': 'acceptEdits', acceptedits: 'acceptEdits', 'auto-edit': 'acceptEdits', auto: 'allowAll', all: 'allowAll', allowall: 'allowAll', plan: 'plan' };
-  const availableCommands = () => COMMANDS.filter((c) => c.where === 'both' || (c.where === 'code' && isCode()));
+  const availableCommands = () =>
+    COMMANDS.filter((c) => c.where === 'both' || (c.where === 'code' && isCode()) || (c.where === 'claude' && isCode() && chat.origin !== 'terminal'));
 
   // Returns true when the text was a command handled here (nothing is sent as a message).
   async function runCommand(text) {
@@ -1860,6 +1868,21 @@ dialog .row { margin-top: 22px; }
         const mode = MODE_WORDS[arg.toLowerCase()];
         if (!mode) { flashTray(`Unknown mode "${arg}". Use ask, edits, auto or plan.`); return true; }
         await setSessionMode(mode);
+        return true;
+      }
+      case 'model': {
+        const ids = sessionModels().map((m) => m.id);
+        if (!arg) {
+          const sel = $('list').querySelector('.modelsel');
+          if (sel) { sel.focus(); try { sel.showPicker(); } catch {} }
+          flashTray(`Model: ${chat.model || 'default'}. Type /model and part of a name (e.g. /model 9b), or /model default.`);
+          return true;
+        }
+        const want = arg.toLowerCase();
+        const hits = want === 'default' ? [''] : ids.filter((id) => id.toLowerCase() === want).concat(ids.filter((id) => id.toLowerCase() !== want && id.toLowerCase().includes(want)));
+        if (!hits.length) { flashTray(`No model matches "${arg}". Models: ${ids.join(', ')}`); return true; }
+        if (hits.length > 1 && hits[0].toLowerCase() !== want) { flashTray(`"${arg}" matches ${hits.join(', ')}. Be more specific.`); return true; }
+        await setSessionModel(hits[0]);
         return true;
       }
       case 'compact':
@@ -2032,6 +2055,7 @@ dialog .row { margin-top: 22px; }
     bar.appendChild(where);
     if (terminal) bar.appendChild(Object.assign(document.createElement('span'), { textContent: '· running in a terminal there ·' }));
     bar.appendChild(modeSelect());
+    if (!terminal) bar.appendChild(modelSelect());
     if (!h || !h.online) {
       const off = document.createElement('span');
       off.className = 'off';
@@ -2068,6 +2092,47 @@ dialog .row { margin-top: 22px; }
     sel.title = modeHelp(cur);
     sel.onchange = () => setSessionMode(sel.value);
     return sel;
+  }
+  // A Claude Code session's model (bridge/hosts.js setModel). Switching restarts Claude Code on
+  // the new model with the next message and keeps the conversation; one too long for the new
+  // model is compacted first, on the current model.
+  const sessionModels = () => (status && status.lmStudio && status.lmStudio.models) || [];
+  const pendingModel = () => (chat && chat.pendingModel && typeof chat.pendingModel === 'object' ? chat.pendingModel.model : undefined);
+  function modelSelect() {
+    const sel = document.createElement('select');
+    sel.className = 'modelsel';
+    sel.setAttribute('aria-label', 'Model');
+    const cur = chat.model || '';
+    const def = status && status.defaultModel;
+    sel.appendChild(new Option(def ? `Default (${def})` : 'Default model', '', !cur, !cur));
+    const models = sessionModels();
+    for (const m of models) sel.appendChild(new Option(m.id + (m.loaded ? ' ●' : ''), m.id, m.id === cur, m.id === cur));
+    if (cur && !models.some((m) => m.id === cur)) sel.appendChild(new Option(cur, cur, true, true));
+    const pending = pendingModel();
+    if (pending !== undefined) {
+      sel.disabled = true;
+      sel.title = `Compacting, then switching to ${pending || 'the default model'}…`;
+    } else sel.title = "This session's model. Switching restarts Claude Code on it with your next message and keeps the conversation; if the conversation is too long for it, it's compacted first.";
+    sel.onchange = () => setSessionModel(sel.value);
+    return sel;
+  }
+  async function setSessionModel(model) {
+    if (!isCode() || chat.origin === 'terminal') return;
+    if ((chat.model || '') === model) { flashTray(`Already on ${model || 'the default model'}.`); return; }
+    if (running()) { flashTray('Wait for Claude Code to finish (or stop it), then switch models.'); refreshCodeBar(); return; }
+    const before = chat.model;
+    try {
+      const r = await apiJson(`/api/chats/${chat.id}/model`, { method: 'POST', body: JSON.stringify({ model }) });
+      if (r.compacting) flashTray(`The conversation is too long for ${model || 'the default model'}: compacting first, then switching.`);
+      else {
+        chat.model = model || undefined;
+        flashTray(`Model: ${model || 'default'}. It takes over with your next message.`);
+      }
+    } catch (e) {
+      chat.model = before;
+      flashTray(e.message);
+    }
+    refreshCodeBar();
   }
   function refreshCodeBar() {
     const old = $('list').querySelector('.codebar');

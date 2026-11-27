@@ -132,6 +132,7 @@ module.exports = function createHosts(d) {
       notes: att.notes,
       cwd: chat.cwd,
       permissionMode: chat.permissionMode,
+      model: chat.model || undefined,
       resume: chat.sdkSessionId || undefined,
     });
     const user = { id: chats.newId(), role: 'user', content: text, at: Date.now() };
@@ -187,6 +188,73 @@ module.exports = function createHosts(d) {
     chats.saveSoon(chat);
   }
 
+  // ------------------------------------------------------------- model --
+  // A Claude Code session's model ('' = the bridge's default). Claude Code fixes the model and
+  // context size when it starts, so the host restarts the session on the new model and resumes
+  // the same conversation (from the next message). If the conversation is past the point where
+  // Claude Code would compact on the new model, it is compacted on the current model first, as
+  // its own turn, and the switch happens when that turn finishes.
+  // Claude Code compacts at about context − 16,384 (reply cap) − 7,000 (claude-remote's reserve).
+  const COMPACT_MARGIN = 16384 + 7000;
+
+  // How big the conversation is now: the size of its last model call (recorded by the bridge
+  // from the call itself, server.js handleAnthropic) or what the latest turn reported, whichever
+  // is bigger. A compaction resets it.
+  function lastUsed(chat) {
+    const t = [...chat.messages].reverse().find((m) => m.role === 'assistant');
+    const reported = t && t.ctx && t.ctx.used ? t.ctx.used : 0;
+    return Math.max(reported, (chat.lastPrompt && chat.lastPrompt.tokens) || 0);
+  }
+
+  async function setModel(chat, body) {
+    if (chat.origin === 'terminal') throw httpError(400, 'Switch Note\'s model in its terminal, with /model.');
+    if (chat.run) throw httpError(409, 'Claude Code is still working in this session. Wait or stop it, then switch.');
+    const model = typeof body.model === 'string' ? body.model : '';
+    if (model) {
+      const known = (await d.listModels().catch(() => [])).map((m) => m.id);
+      if (!known.includes(model)) throw httpError(400, `Unknown model "${model}".`);
+    }
+    if (model === (chat.model || '')) return { ok: true, model, compacting: false };
+    const ctx = await d.contextOf(model || (await d.listModels().then((l) => (l.find((m) => m.loaded) || {}).id).catch(() => '')));
+    const used = lastUsed(chat);
+    if (ctx && used > ctx - COMPACT_MARGIN) {
+      // Too big for the new model: compact first (on the current model), then switch.
+      const { assistantId } = await message(chat, { content: '/compact' });
+      chat.pendingModel = { model, turnId: assistantId };
+      chats.emit(chat, { type: 'model', model: chat.model || '', pending: model });
+      chats.saveSoon(chat);
+      log(`Session ${chat.id}: compacting (~${used} tokens) before switching to ${model || 'the default model'} (${ctx} context)`);
+      return { ok: true, model, compacting: true };
+    }
+    switchModel(chat, model);
+    return { ok: true, model, compacting: false };
+  }
+
+  function switchModel(chat, model) {
+    chat.pendingModel = undefined;
+    chat.model = model || undefined;
+    // A session running on its computer restarts on the new model with the next message; an
+    // offline one just gets the model with its next message.
+    try {
+      command(chat.host, { type: 'model', chatId: chat.id, model: model || undefined });
+    } catch {}
+    chats.emit(chat, { type: 'model', model: model || '' });
+    chats.saveSoon(chat);
+    log(`Session ${chat.id}: model set to ${model || 'the default model'}`);
+  }
+
+  // A turn ended: if it was the compaction before a switch, switch if it worked, otherwise
+  // stay on the current model.
+  function compactDone(chat, turnId, ok) {
+    const p = chat.pendingModel;
+    if (!p || p.turnId !== turnId) return;
+    if (ok) return switchModel(chat, p.model);
+    chat.pendingModel = undefined;
+    chats.emit(chat, { type: 'model', model: chat.model || '' });
+    chats.saveSoon(chat);
+    log(`Session ${chat.id}: compaction didn't finish, so the model stays ${chat.model || 'the default'}`);
+  }
+
   function end(chat) {
     try {
       command(chat.host, { type: 'end', chatId: chat.id });
@@ -201,6 +269,7 @@ module.exports = function createHosts(d) {
       chats.emit(chat, { type: 'error', id: turn.id, message: error });
     }
     if (chat.run) chats.endRun(chat, state, error);
+    if (turn) compactDone(chat, turn.id, false);
   }
 
   // Note: a terminal session the website hasn't seen yet becomes a code chat.
@@ -262,6 +331,13 @@ module.exports = function createHosts(d) {
       [...chat.messages].reverse().find((m) => m.role === 'assistant');
     if (ev.type === 'session') {
       chat.sdkSessionId = ev.sessionId;
+      chats.saveSoon(chat);
+      return;
+    }
+    if (ev.type === 'compacted') {
+      // Claude Code compacted the conversation: the last call's size no longer applies.
+      chat.lastPrompt = undefined;
+      if (turn && turn.ctx) turn.ctx = undefined;
       chats.saveSoon(chat);
       return;
     }
@@ -329,6 +405,7 @@ module.exports = function createHosts(d) {
         Object.assign(out, { result: turn.result });
         chats.emit(chat, out);
         if (chat.run) chats.endRun(chat, stopping ? 'stopped' : ev.isError ? 'error' : 'done', ev.isError && !stopping ? ev.text || ev.subtype : undefined);
+        compactDone(chat, turn.id, !stopping && !ev.isError);
         return;
       }
       case 'error':
@@ -484,7 +561,7 @@ module.exports = function createHosts(d) {
     run();
   }
 
-  const api = { list, validateNew, adoptExisting, message, stop, permission, setMode, end, handle, startLocalHost };
+  const api = { list, validateNew, adoptExisting, message, stop, permission, setMode, setModel, end, handle, startLocalHost };
   chats.setCode(api);
   return api;
 };

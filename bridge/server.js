@@ -1474,6 +1474,17 @@ async function handleAnthropic(req, res, route) {
   const searchTool = (body.tools || []).find(isWebSearchTool);
   if (searchTool) return handleWebSearch(req, res, body, searchTool);
 
+  // A website session's main calls (the ones with tools; side calls like titles have none):
+  // remember how big the conversation is, for switching it to a model with a smaller context.
+  const tag = String(req.headers['x-local-llm-chat'] || '');
+  if (tag && (body.tools || []).length && !route.endsWith('/count_tokens')) {
+    const chat = chats.chats.get(tag);
+    if (chat && chat.kind === 'code') {
+      chat.lastPrompt = { tokens: Math.round(anthropicChars(body) * tokensPerChar), at: Date.now() };
+      chats.saveSoon(chat);
+    }
+  }
+
   try {
     await ensureModelLoaded(model, () => {});
   } catch (e) {
@@ -1932,7 +1943,10 @@ async function ensureProjectMd(name) {
   await writeMd(t, projectTemplate(name, ''), 'new Claude Code session (starter)');
   return true;
 }
-const hosts = require('./hosts')({ log, httpError, readJson, json, openEventStream, chats, projectForFolder, ensureProjectMd, getProjectDir });
+const hosts = require('./hosts')({
+  log, httpError, readJson, json, openEventStream, chats, projectForFolder, ensureProjectMd, getProjectDir,
+  listModels, contextOf: loadedContext,
+});
 
 const server = http.createServer(async (req, res) => {
   applyCors(req, res);
