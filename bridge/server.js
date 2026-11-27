@@ -97,6 +97,7 @@ function loadConfig() {
 
 const cfg = loadConfig();
 const second = require('./second-model')(cfg, log);
+const { shrinkImages } = require('./images');
 // Where requests for `model` go: the second model's llama-server, or LM Studio.
 const baseUrl = (model) => (second.has(model) ? second.url : cfg.lmStudioUrl);
 
@@ -1490,6 +1491,9 @@ async function handleAnthropic(req, res, route) {
   } catch (e) {
     log('model load: ' + e.message);
   }
+  // Big screenshots would need more GPU memory than the model has left (bridge/images.js).
+  const shrunk = await shrinkImages(body.messages).catch(() => 0);
+  if (shrunk) log(`Claude Code: shrank ${shrunk} image${shrunk === 1 ? '' : 's'}`);
   log(
     `Claude Code: ${body.messages.length} messages, ${(body.tools || []).length} tools, ~${Math.round(
       anthropicChars(body) * tokensPerChar
@@ -1562,6 +1566,8 @@ async function handleNoteChat(req, res) {
   } catch (e) {
     log('model load: ' + e.message);
   }
+  const shrunk = await shrinkImages(body.messages).catch(() => 0);
+  if (shrunk) log(`Note: shrank ${shrunk} image${shrunk === 1 ? '' : 's'}`);
   log(`Note: ${body.messages.length} messages, ${(body.tools || []).length} tools${body.stream ? ', streaming' : ''} -> ${model}`);
 
   const ac = new AbortController();

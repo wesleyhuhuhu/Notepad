@@ -147,7 +147,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 - **Cost:** Exa's free balance is $10 a month. With the defaults (`"webSearchType": "auto"`, 8 results, 1,500-character excerpts) a search costs about $0.007, so roughly 1,400 searches a month; `"lite"` costs about $0.004. The bridge window logs each search with its cost.
 - **Other services:** `"webSearchProvider"` picks the service. `exa` is the only one so far; others can be added to `searchProviders` in `bridge/server.js`.
 
-**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 29k with the 16,384 reply cap (launchers and website sessions). With the default 96k context that's about **67k** (about 61k when loaded at 90k).
+**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 29k with the 16,384 reply cap (launchers and website sessions). With the current 88k context that's about **59k**.
 
 The reply cap covers thinking too. At 8,192 a long think, for example while weighing several pages of web search results, could hit it ("API Error: Claude's response exceeded the 8192 output token maximum"), so the default is now 16,384. Measured earlier with a 55.3k context:
 
@@ -217,7 +217,19 @@ Measured with the PC's own host: a "create a file and run it" task took about 45
 
 By default (`"contextLength": 0`) the bridge leaves loading to LM Studio, which uses the model's saved settings in **My Models**: context length, GPU offload, Flash Attention and KV cache quantization. If the model isn't loaded, LM Studio loads it on the first message with those settings.
 
-Set the context length there to something that fits. Measured on the RTX 5070 Ti with the current model (`qwen3.8-27b-heretic-gsq-rco`) and its saved cache setting of q8_0 keys / q4_0 values:
+**Current setting: 88k (88,000), the MTP model with the 5070 Ti doing nothing but the LLM.** Text alone fits at 96k, but reading an image needs extra GPU memory. At 96k there was only ~300 MB to spare, and even a 360×360 screenshot crashed LM Studio's engine ("CUDA error: out of memory"). The crash repeated on every retry, because each turn re-reads every image in the conversation. Measured on 2026-11-26 (ceiling ~15.7 GB used):
+
+| Context | After loading | Results with images |
+|---|---|---|
+| 96k | 15,444 MiB | a 360×360 image crashes it |
+| 94k | 15,390 MiB | 360×360 works; 1577×916 crashes it |
+| 92k | 15,328 MiB | 1577×916 works; 2560×1440 fails (its encoder needs a 422 MiB buffer) |
+| 90k | 15,270 MiB | images up to 1600 px work, peaking at 15,608 MiB |
+| **88k** | 15,208 MiB | images up to 1600 px work, peaking at 15,546 MiB; also at the end of an 87k-token prompt, and with 3 images in one message |
+
+The bridge shrinks bigger images to 1600 px on the long side before they reach the model (`bridge/images.js`, using Windows' own image library). The website already sends them at 1280 px or less. So 88k is safe for screenshots of any size, with ~150 MiB to spare.
+
+Older measurements, from before the 6800 XT took over the display, with the earlier model (`qwen3.8-27b-heretic-gsq-rco`) and a q8_0 key / q4_0 value cache:
 
 | Context | GPU memory used in total | Generation speed |
 |---|---|---|
@@ -306,7 +318,7 @@ In `bridge/config.json`, change `"allowedOrigins": ["*"]` to `["https://<your-us
 - **Log:** `bridge\logs\bridge-<date>.log` has the bridge window's output, without the access token. Logs older than 14 days are deleted.
 - **Stop it:** `.\stop-bridge.ps1`. The task's 5-minute check starts it again; to keep it off, remove the task (below).
 - **Remove it:** `.\install-autostart.ps1 -Remove`. Running `.\install-autostart.ps1` sets it up again (no administrator rights needed).
-- **Context at login:** the task loads the model with LM Studio's saved settings (96k). If it's slow, load it at 90k: `lms load qwen3.8-27b-heretic-gsq-rco -y --context-length 90000`.
+- **Context at login:** the task loads the model with LM Studio's saved settings (88k; see "Model loading" for why not more).
 
 **By hand:**
 
