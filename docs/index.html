@@ -444,6 +444,12 @@ aside#mdpanel.open { display: flex; }
 .perm pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; }
 .perm .row { justify-content: flex-start; }
 .perm.done { border-style: dashed; border-color: var(--border-strong); background: transparent; box-shadow: none; color: var(--muted); padding: 6px 14px; font-size: 13px; }
+/* An answered request is one line, like a tool row: a long command without spaces used to make the
+   whole chat wider than the window (a sideways scrollbar). The full text is in its tooltip. */
+.perm.done { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Nothing in a reply should ever be wider than the column. */
+.msg { min-width: 0; }
+.perm, .cblocks .body { overflow-wrap: anywhere; }
 .perm.done .q::before { display: none; }
 .turnfoot { font-size: 12px; color: var(--faint); margin-top: 8px; font-variant-numeric: tabular-nums; }
 /* Claude Code sessions: only the context meter stays in the row under the message box. */
@@ -2388,6 +2394,7 @@ dialog .row { margin-top: 22px; }
           it.el.className = 'perm done';
           const what = { allowed: b.always ? 'Allowed for this session' : 'Allowed', denied: 'Denied', expired: 'Not answered' }[b.state] || b.state;
           it.el.textContent = `${what}: ${toolLine(b.toolName, b.input)}`;
+          it.el.title = it.el.textContent;
         }
       }
     }
