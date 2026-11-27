@@ -409,6 +409,9 @@ aside#mdpanel.open { display: flex; }
   padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-sm);
 }
 .codebar code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; color: var(--text); }
+.secondctl { display: inline-flex; align-items: center; gap: 6px; }
+.secondctl .sstate::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--muted); vertical-align: 1px; }
+.secondctl .sstate.on::before { background: var(--ok, #2e9d5b); }
 .codebar .off { color: var(--warn); font-weight: 600; }
 .codebar select {
   font: inherit; font-size: 12.5px; font-weight: 500; height: 28px; padding: 0 10px; border: 1px solid var(--border-strong);
@@ -568,6 +571,7 @@ dialog .row { margin-top: 22px; }
       </div>
       <div class="inner meta">
         <label title="Model to use">Model <select id="model"><option value="">(default)</option></select></label>
+        <span class="secondctl" id="secondCtl" hidden></span>
         <label title="Let the model change CLAUDE.md files with tools"><input type="checkbox" id="allowEdits" checked> Model can edit CLAUDE.md</label>
         <span class="ctx" id="ctxMeter" hidden><span class="bar"><i id="ctxFill"></i></span><span id="ctxText"></span></span>
         <button type="button" class="linkbtn" id="btnCompact" title="Summarize this chat so far to free up context">Compact</button>
@@ -681,6 +685,18 @@ dialog .row { margin-top: 22px; }
       <label for="sSystem">Extra system prompt (optional)</label>
       <textarea id="sSystem" rows="3"></textarea>
       <div class="hint">Added after the CLAUDE.md files. Use CLAUDE.md for anything you want kept on the PC.</div>
+    </div>
+    <div class="field" id="sSecondField" hidden>
+      <label for="sIdle" id="sSecondLabel">Small model</label>
+      <div class="row"><span class="grow" id="sSecondState"></span><button type="button" id="sSecondBtn">Unload</button></div>
+      <select id="sIdle">
+        <option value="0">Keep it loaded</option>
+        <option value="10">Unload after 10 min unused</option>
+        <option value="30">Unload after 30 min unused</option>
+        <option value="60">Unload after 1 hour unused</option>
+        <option value="120">Unload after 2 hours unused</option>
+      </select>
+      <div class="hint">Unloading frees ~9.5 GB on that card, e.g. for a game. After it unloads for being unused, your next message to it loads it again (10–20 s). After you unload it here, it stays off until you load it.</div>
     </div>
     <div class="field">
       <label for="sTheme">Theme</label>
@@ -803,6 +819,7 @@ dialog .row { margin-top: 22px; }
         setStatus('ok', loaded.length ? loaded.map((m) => m.id).join(', ') : 'Connected (no model loaded)');
       }
       fillModels(status);
+      renderSecond();
       updateAttach();
       updateMeter();
       $('allowEdits').disabled = !status.allowModelEdits;
@@ -825,10 +842,52 @@ dialog .row { margin-top: 22px; }
     for (const m of s.lmStudio.models || []) {
       const o = document.createElement('option');
       o.value = m.id;
-      o.textContent = m.id + (m.loaded ? ' ●' : '');
+      o.textContent = m.id + (m.loaded ? ' ●' : '') + (m.second && !m.loaded ? (m.second === 'off' ? ' (unloaded)' : ' (loads on use)') : '');
       sel.appendChild(o);
     }
     sel.value = [...sel.options].some((o) => o.value === keep) ? keep : '';
+  }
+
+  // The second model (the small one on the other GPU, bridge/second-model.js): its state, and
+  // Load / Unload, next to the Model menu and in Settings (with the auto-unload time).
+  let secondBusy = '';
+  function secondText(s) {
+    if (secondBusy) return secondBusy;
+    return { loaded: 'loaded', loading: 'loading…', unloading: 'unloading…', unloaded: 'unloaded', idle: 'unloaded (loads on use)', stopped: 'not running' }[s.state] || s.state;
+  }
+  function renderSecond() {
+    const s = status && status.secondModel;
+    const ctl = $('secondCtl');
+    $('sSecondField').hidden = !s;
+    ctl.hidden = !s;
+    if (!s) return;
+    const loaded = s.state === 'loaded' || s.state === 'loading';
+    const where = s.gpu ? ` on the ${s.gpu}` : '';
+    ctl.textContent = '';
+    ctl.append(Object.assign(document.createElement('span'), { className: 'sstate ' + (s.state === 'loaded' ? 'on' : 'off'), textContent: `${s.id.split('-').slice(0, 2).join(' ')}: ${secondText(s)}`, title: `${s.id}${where}` }));
+    const b = Object.assign(document.createElement('button'), { type: 'button', className: 'linkbtn', textContent: loaded ? 'Unload' : 'Load', disabled: !!secondBusy });
+    b.title = loaded ? `Unload ${s.id} to free its GPU memory` : `Load ${s.id}${where}`;
+    b.onclick = () => toggleSecond(loaded ? 'unload' : 'load');
+    ctl.append(b);
+    $('sSecondLabel').textContent = `Small model${where} (${s.id})`;
+    $('sSecondState').textContent = secondText(s) + (s.error ? ` — ${s.error}` : '');
+    $('sSecondBtn').textContent = loaded ? 'Unload' : 'Load';
+    $('sSecondBtn').disabled = !!secondBusy;
+    const idle = String(s.idleMinutes || 0);
+    if (![...$('sIdle').options].some((o) => o.value === idle)) $('sIdle').append(new Option(`Unload after ${idle} min unused`, idle));
+    $('sIdle').value = idle;
+  }
+  async function toggleSecond(action) {
+    secondBusy = action === 'load' ? 'loading… (10–20 s)' : 'unloading…';
+    renderSecond();
+    try {
+      status.secondModel = await apiJson('/api/second-model', { method: 'POST', body: JSON.stringify({ action }) });
+      flashTray(action === 'load' ? `${status.secondModel.id} is loaded.` : `${status.secondModel.id} is unloaded; its GPU memory is free.`);
+    } catch (e) {
+      flashTray(e.message);
+    }
+    secondBusy = '';
+    await refreshStatus();
   }
 
   // ---------------------------------------------------------- projects --
@@ -2639,6 +2698,19 @@ dialog .row { margin-top: 22px; }
   $('mdSave').addEventListener('click', saveMd);
   $('mdGenerate').addEventListener('click', () => { if (window.innerWidth <= 860) $('mdpanel').classList.remove('open'); generateMd(); });
   $('model').addEventListener('change', () => { store.set('model', $('model').value); updateAttach(); updateMeter(); });
+  $('sSecondBtn').addEventListener('click', () => {
+    const s = status && status.secondModel;
+    if (s) toggleSecond(s.state === 'loaded' || s.state === 'loading' ? 'unload' : 'load');
+  });
+  $('sIdle').addEventListener('change', async () => {
+    try {
+      status.secondModel = await apiJson('/api/second-model', { method: 'POST', body: JSON.stringify({ idleMinutes: Number($('sIdle').value) }) });
+      $('sResult').textContent = Number($('sIdle').value) ? `The small model now unloads after ${$('sIdle').value} min unused.` : 'The small model now stays loaded.';
+    } catch (e) {
+      $('sResult').textContent = e.message;
+    }
+    renderSecond();
+  });
   $('btnCompact').addEventListener('click', openCompact);
   $('cpGo').addEventListener('click', runCompact);
   $('compactDlg').addEventListener('cancel', () => {

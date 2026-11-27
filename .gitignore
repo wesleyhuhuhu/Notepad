@@ -8,3 +8,4 @@ bridge/chats/
 host/node_modules/
 bridge/logs/
 amd/
+bridge/second-model-state.json

@@ -1068,6 +1068,8 @@ async function chatCore(body, send, signal) {
 
   {
     const model = await resolveModel(body.model);
+    // The second model: loads it if it was unloaded for being idle; an error if it was unloaded.
+    if (second.has(model) && (await second.ensureReady((text) => send({ type: 'status', text })))) send({ type: 'status', text: '' });
     try {
       if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
     } catch (e) {
@@ -1486,6 +1488,13 @@ async function handleAnthropic(req, res, route) {
     }
   }
 
+  if (second.has(model)) {
+    try {
+      await second.ensureReady();
+    } catch (e) {
+      return json(res, e.status || 503, { type: 'error', error: { type: 'api_error', message: e.message } });
+    }
+  }
   try {
     await ensureModelLoaded(model, () => {});
   } catch (e) {
@@ -1561,6 +1570,15 @@ async function handleNoteChat(req, res) {
   const model = alias === NOTE_LITE ? second.id : await resolveModel(null);
   body.model = model;
   body.messages = foldOpenAiSystem(body.messages);
+  if (second.has(model)) {
+    try {
+      await second.ensureReady();
+    } catch (e) {
+      // Says "the lite model" rather than the real name: Note never shows it.
+      const msg = e.status === 409 ? 'The lite model is unloaded. Load it on the website (Load, next to the Model menu, or in Settings), or run .\\second-model.ps1 on on the PC.' : 'The lite model could not be loaded.';
+      return json(res, e.status || 503, { error: { message: msg, type: 'api_error' } });
+    }
+  }
   try {
     await ensureModelLoaded(model, () => {});
   } catch (e) {
@@ -1657,6 +1675,7 @@ async function compactCore(body, send, signal) {
   const instructions = typeof body.instructions === 'string' ? body.instructions.trim().slice(0, 2000) : '';
 
   const model = await resolveModel(body.model);
+  if (second.has(model) && (await second.ensureReady((text) => send({ type: 'status', text })))) send({ type: 'status', text: '' });
   try {
     if (await ensureModelLoaded(model, (text) => send({ type: 'status', text }))) send({ type: 'status', text: '' });
   } catch {}
@@ -1708,6 +1727,7 @@ async function handleStatus(res) {
     webSearch: webSearchReady(),
     projectsRoot: cfg.projectsRootAbs || null,
     globalClaudeMd: cfg.claudeMdAbs,
+    secondModel: await second.status(),
   });
 }
 
@@ -1983,6 +2003,23 @@ const server = http.createServer(async (req, res) => {
     switch (route) {
       case 'GET /api/status':
         return await handleStatus(res);
+      // The second model (bridge/second-model.js): its state, and loading / unloading it.
+      case 'GET /api/second-model':
+        return json(res, 200, (await second.status()) || { error: 'No second model is set up.' });
+      case 'POST /api/second-model': {
+        if (!second.enabled) return json(res, 404, { error: 'No second model is set up in bridge/config.json.' });
+        const body = await readJson(req);
+        if (body.idleMinutes !== undefined) {
+          try {
+            second.setIdle(body.idleMinutes);
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+        if (body.action === 'load') return json(res, 200, await second.load());
+        if (body.action === 'unload') return json(res, 200, await second.unload());
+        return json(res, 200, await second.status());
+      }
       // Claude-format API, so Claude Code can use the local model (see cli/claude-local.*).
       case 'POST /v1/messages':
       case 'POST /v1/messages/count_tokens':
@@ -2013,6 +2050,7 @@ const server = http.createServer(async (req, res) => {
         if (!ctx && model && url.searchParams.get('load') === '1') {
           // Not in memory: load it (the bridge's cap if set, else LM Studio's saved settings) to learn its context.
           await ensureModelLoaded(model, () => {}).catch(() => {});
+          if (second.has(model)) await second.ensureReady().catch(() => {});
           await fetch(baseUrl(model) + '/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

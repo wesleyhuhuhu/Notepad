@@ -267,6 +267,16 @@ The RTX 5070 Ti runs the 27B in LM Studio; the RX 6800 XT (which drives the scre
 - **What runs:** `Qwen3.8-9B-heretic-uncensored` Q6_K ([mradermacher's GGUF](https://huggingface.co/mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF)) with a 64k context, in llama.cpp's own `llama-server` (Vulkan build). LM Studio can't serve it: it runs one GGUF engine at a time, and that one is CUDA, which only sees the NVIDIA card.
 - **Where:** `amd\llama.cpp\` (the [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) `llama-bXXXXX-bin-win-vulkan-x64.zip`, unzipped) and `amd\models\`. The `amd` folder isn't in git.
 - **How it starts:** the bridge starts it (hidden, port 1235, local only) and checks it every 30 s, starting it again if it stops. Restarting the bridge restarts it too (~20 s to load); one that's already running is reused. Its output goes to `bridge\logs\second-model.log`. The card is found by name (`"gpu": "6800 XT"`), so device numbering doesn't matter.
+- **Loading and unloading:** it isn't in LM Studio, so LM Studio's eject button doesn't apply. Instead:
+  - **Website:** the **Load / Unload** button next to the Model menu shows its state. **Settings** has the same button, plus **auto-unload** after 10 min, 30 min, 1 hour or 2 hours unused.
+  - **On the PC:**
+    - `.\second-model.ps1` shows its state.
+    - `.\second-model.ps1 off` unloads it, e.g. before a game.
+    - `.\second-model.ps1 on` loads it (10–20 s).
+    - `.\second-model.ps1 -Idle 30` sets auto-unload; `-Idle 0` turns it off.
+  - **Unloaded by you:** it stays off, also through bridge restarts and reboots, until you load it. Messages to it get "unloaded, load it…" instead of an answer.
+  - **Unloaded after being unused:** the next message to it loads it again, then answers.
+  - The choice is saved in `bridge\second-model-state.json`. The bridge never unloads it in the middle of a reply.
 - **Using it:**
   - **Website:** pick `qwen3.8-9b-heretic` in **Model**. Chats on the two models run at the same time; chats on the same model take turns.
   - **Note:** `note setup` (version 0.28.5 or newer) adds a second model, **Lite**; switch with `/model`. Note calls it `note-lite` and never sees the real name.
