@@ -21,5 +21,14 @@
   "webSearchResults": 8,
   "webSearchChars": 1500,
   "siteUrl": "",
+  "secondModel": {
+    "enabled": false,
+    "id": "qwen3.8-9b-heretic",
+    "gpu": "6800 XT",
+    "port": 1235,
+    "server": "../amd/llama.cpp/llama-server.exe",
+    "model": "../amd/models/Qwen3.8-9B-heretic-uncensored.Q6_K.gguf",
+    "context": 65536
+  },
   "accessToken": ""
 }

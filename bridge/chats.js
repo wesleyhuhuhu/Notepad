@@ -14,6 +14,8 @@ const crypto = require('crypto');
 
 module.exports = function createChats(d) {
   const { cfg, log, friendlyError, httpError, readJson, json, openEventStream } = d;
+  // Which GPU a model runs on: chats for different ones don't wait for each other.
+  const laneOf = d.laneOf || (() => 'main');
   const ROOT = path.join(__dirname, 'chats');
   const TRASH = path.join(ROOT, '.trash');
   const BUFFER_MAX = 20000; // events kept per chat for devices that reconnect
@@ -32,7 +34,7 @@ module.exports = function createChats(d) {
   const running = new Map(); // chat id -> AbortController of its active run
   let queue = []; // chat ids waiting for the model, in order
   let code = null; // Claude Code sessions (hosts.js), set by setCode()
-  let pumping = false;
+  const pumping = new Set(); // lanes (GPUs) with a run going
 
   // ------------------------------------------------------------ storage --
   function withLock(id, fn) {
@@ -219,17 +221,25 @@ module.exports = function createChats(d) {
     log(`Chat "${chat.title || chat.id}": ${kind} ${state}${error ? ` (${error})` : ''}`);
   }
 
+  const laneOfChat = (chat) => laneOf((chat.run && chat.run.opts && chat.run.opts.model) || '');
+
   function enqueue(chat) {
     queue.push(chat.id);
-    pump();
+    pump(laneOfChat(chat));
   }
 
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
+  // One run at a time per lane, in order.
+  async function pump(lane) {
+    if (pumping.has(lane)) return;
+    pumping.add(lane);
     try {
-      while (queue.length) {
-        const chat = chats.get(queue.shift());
+      for (;;) {
+        const i = queue.findIndex((id) => {
+          const c = chats.get(id);
+          return !c || !c.run || c.run.state !== 'queued' || laneOfChat(c) === lane;
+        });
+        if (i < 0) break;
+        const chat = chats.get(queue.splice(i, 1)[0]);
         if (!chat || !chat.run || chat.run.state !== 'queued') continue;
         const ac = new AbortController();
         running.set(chat.id, ac);
@@ -243,7 +253,7 @@ module.exports = function createChats(d) {
         }
       }
     } finally {
-      pumping = false;
+      pumping.delete(lane);
     }
   }
 

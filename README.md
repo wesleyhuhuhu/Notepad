@@ -248,6 +248,27 @@ The limit moves with whatever else is using the GPU. If replies suddenly crawl, 
 
 While gaming, start with `.\start.ps1 -ContextLength 16384`. The bridge then treats 16,384 as a cap: on the next message, if the model is loaded with a bigger context (or not loaded), it reloads it at 16,384. You can also set a permanent cap with `"contextLength"` in `config.json`. The chat shows "Loading the model…" while that happens, which takes about 20 seconds. Set `"contextLength": 0` to leave loading to LM Studio.
 
+## A second model on the other GPU
+
+The RTX 5070 Ti runs the 27B in LM Studio; the RX 6800 XT (which drives the screens and games) runs a smaller model at the same time, with room left for a game.
+
+- **What runs:** `Qwen3.8-9B-heretic-uncensored` Q6_K ([mradermacher's GGUF](https://huggingface.co/mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF)) with a 64k context, in llama.cpp's own `llama-server` (Vulkan build). LM Studio can't serve it: it runs one GGUF engine at a time, and that one is CUDA, which only sees the NVIDIA card.
+- **Where:** `amd\llama.cpp\` (the [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) `llama-bXXXXX-bin-win-vulkan-x64.zip`, unzipped) and `amd\models\`. The `amd` folder isn't in git.
+- **How it starts:** the bridge starts it (hidden, port 1235, local only) and checks it every 30 s, starting it again if it stops; a server already running from an earlier bridge is reused. Its output goes to `bridge\logs\second-model.log`. The card is found by name (`"gpu": "6800 XT"`), so device numbering doesn't matter.
+- **Using it:**
+  - **Website:** pick `qwen3.8-9b-heretic` in **Model**. Chats on the two models run at the same time; chats on the same model take turns.
+  - **Note:** `note setup` (version 0.28.5 or newer) adds a second model, **Lite**; switch with `/model`. Note calls it `note-lite` and never sees the real name.
+  - **Claude Code** (`claude-local` and website sessions) keeps using the 27B.
+  - It can't see images (no vision file).
+- **Measured on the 6800 XT:**
+  - **VRAM:** ~9.5 GB. The desktop takes ~1 GB, so ~5.5 GB is left for a game (CS2 used ~3.3 GB in its menu).
+  - **Speed:** ~60 tokens/s on a short chat, ~47 tokens/s at 23k tokens; reading the prompt runs at ~800 tokens/s.
+  - Running it while you play takes GPU time from the game, so expect lower FPS during a reply.
+- **Settings found by testing:**
+  - Flash attention and a q8_0 KV cache both cut prompt reading on this card to 100–250 tokens/s at 20k+ tokens, so both are off.
+  - A 256-token batch saves ~1 GB at 64k for ~7% slower prompt reading.
+  - Change them with `"flashAttention"`, `"cacheTypeK"`, `"cacheTypeV"`, `"batch"`, `"context"` or extra `"args"` under `"secondModel"` in `bridge\config.json`. `"enabled": false` turns it off. The bridge needs a restart to pick up changes, and the running `llama-server` has to be stopped as well (`Stop-Process -Name llama-server` also stops LM Studio's, so pick it by path).
+
 ## One-time setup
 
 ### 1. Turn on Tailscale Funnel

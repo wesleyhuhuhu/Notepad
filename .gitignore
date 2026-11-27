@@ -7,3 +7,4 @@ node_modules/
 bridge/chats/
 host/node_modules/
 bridge/logs/
+amd/

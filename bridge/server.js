@@ -58,6 +58,9 @@ const DEFAULTS = {
   webSearchChars: 1500, // excerpt length per result
   // Plain chats on the website can search the web (needs the key above) and read web pages.
   allowWebTools: true,
+  // A second model on another GPU, run by llama.cpp's llama-server (see bridge/second-model.js
+  // and config.example.json). null = none.
+  secondModel: null,
   accessToken: '',
 };
 
@@ -93,6 +96,9 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
+const second = require('./second-model')(cfg, log);
+// Where requests for `model` go: the second model's llama-server, or LM Studio.
+const baseUrl = (model) => (second.has(model) ? second.url : cfg.lmStudioUrl);
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -725,6 +731,7 @@ function calibrate(est, promptTokens) {
 }
 
 async function loadedContext(model) {
+  if (second.has(model)) return second.context();
   try {
     const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(5000) });
     const m = ((await r.json()).data || []).find((x) => x.id === model);
@@ -770,7 +777,7 @@ function transcriptOf(m) {
 }
 
 async function summaryCall(model, userPrompt, signal) {
-  const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+  const r = await fetch(baseUrl(model) + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -854,7 +861,7 @@ async function summarizeInPlace({ system, tools, messages, previous, instruction
   ].join('\n');
   let j;
   try {
-    const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+    const r = await fetch(baseUrl(model) + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -943,7 +950,7 @@ async function streamCompletion(payload, send, signal, promptEstimate) {
   gen('reading', true);
   const readingTimer = setInterval(() => { if (!tFirst) gen('reading', true); }, 1000);
   try {
-  const r = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+  const r = await fetch(baseUrl(payload.model) + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...payload, stream: true, stream_options: { include_usage: true } }),
@@ -1484,7 +1491,7 @@ async function handleAnthropic(req, res, route) {
   });
   let upstream;
   try {
-    upstream = await fetch(cfg.lmStudioUrl + '/v1/messages', {
+    upstream = await fetch(baseUrl(model) + '/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'anthropic-version': req.headers['anthropic-version'] || '2023-06-01' },
       body: JSON.stringify(body),
@@ -1517,6 +1524,9 @@ async function handleAnthropic(req, res, route) {
 // model name Note sends (normally "note") is mapped to the bridge's model, and replies name the
 // model "note", so the real model name never shows up in Note.
 const NOTE_MODEL = 'note';
+// "note-lite" picks the second model (the smaller one on the other GPU), when there is one.
+const NOTE_LITE = 'note-lite';
+const noteModels = () => [NOTE_MODEL, ...(second.enabled ? [NOTE_LITE] : [])];
 
 // The model's chat template only allows a system message at the start: keep the leading ones
 // there and fold later ones into the neighbouring user turn (as for Claude Code).
@@ -1532,7 +1542,8 @@ function foldOpenAiSystem(messages) {
 
 async function handleNoteChat(req, res) {
   const body = await readJson(req, 64 * 1024 * 1024);
-  const model = await resolveModel(null);
+  const alias = body.model === NOTE_LITE && second.enabled ? NOTE_LITE : NOTE_MODEL;
+  const model = alias === NOTE_LITE ? second.id : await resolveModel(null);
   body.model = model;
   body.messages = foldOpenAiSystem(body.messages);
   try {
@@ -1548,7 +1559,7 @@ async function handleNoteChat(req, res) {
   });
   let upstream;
   try {
-    upstream = await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+    upstream = await fetch(baseUrl(model) + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1557,9 +1568,10 @@ async function handleNoteChat(req, res) {
   } catch (e) {
     return json(res, 502, { error: { message: friendlyError(e), type: 'api_error' } });
   }
-  // LM Studio names the model in "model" and again in "system_fingerprint".
-  const modelRe = new RegExp(`"(model|system_fingerprint)"\\s*:\\s*"${String(model).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g');
-  const rename = (s) => s.replace(modelRe, (_, key) => `"${key}":"${NOTE_MODEL}"`);
+  // The server names the model in "model" and in "system_fingerprint" (LM Studio: the model;
+  // llama-server: its build), so both are replaced with Note's name for it.
+  const modelRe = new RegExp(`"model"\\s*:\\s*"${String(model).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g');
+  const rename = (s) => s.replace(modelRe, `"model":"${alias}"`).replace(/"system_fingerprint"\s*:\s*"[^"]*"/g, `"system_fingerprint":"${alias}"`);
   if (!upstream.ok) {
     const text = await upstream.text().catch(() => '');
     log(`Note: LM Studio returned ${upstream.status}: ${text.slice(0, 300)}`);
@@ -1688,7 +1700,8 @@ async function resolveModel(requested) {
   if (typeof requested === 'string' && requested) return requested;
   if (cfg.model) return cfg.model;
   try {
-    const models = await listModels();
+    // The default is always one of LM Studio's models, never the second model.
+    const models = await lmStudioModels();
     const pick = models.find((m) => m.loaded) || models[0];
     if (pick) return pick.id;
   } catch {}
@@ -1788,7 +1801,13 @@ async function watchLmStudio() {
   }
 }
 
+// LM Studio's models, then the second model (if there is one).
 async function listModels() {
+  const lm = await lmStudioModels();
+  return [...lm, ...(await second.models())];
+}
+
+async function lmStudioModels() {
   // LM Studio's native REST API reports load state; fall back to the OpenAI list.
   try {
     const r = await fetch(cfg.lmStudioUrl + '/api/v0/models', { signal: AbortSignal.timeout(4000) });
@@ -1895,6 +1914,7 @@ function checkAuth(req) {
 
 const chats = require('./chats')({
   cfg, log, friendlyError, httpError, readJson, json, openEventStream, getProjectDir, chatCore, compactCore,
+  laneOf: (model) => (second.has(model) ? 'second' : 'main'),
 });
 // Computers that run Claude Code sessions for the website (bridge/hosts.js, host/claude-remote.mjs).
 // A folder directly inside projectsRoot is that project (Claude Code sessions in it belong to it).
@@ -1953,7 +1973,19 @@ const server = http.createServer(async (req, res) => {
       case 'POST /note/v1/chat/completions':
         return await handleNoteChat(req, res);
       case 'GET /note/v1/models':
-        return json(res, 200, { object: 'list', data: [{ id: NOTE_MODEL, object: 'model', created: 0, owned_by: 'local' }] });
+        // The lite model's context goes along, for "note setup" (the main one comes from /api/claude-code).
+        return json(res, 200, {
+          object: 'list',
+          data: await Promise.all(
+            noteModels().map(async (id) => ({
+              id,
+              object: 'model',
+              created: 0,
+              owned_by: 'local',
+              ...(id === NOTE_LITE ? { context_length: (await second.context()) || undefined } : {}),
+            }))
+          ),
+        });
       case 'GET /api/claude-code': {
         // What the launcher scripts need: the model to use and its context size, as KEY=VALUE lines.
         const model = await resolveModel(url.searchParams.get('model'));
@@ -1961,7 +1993,7 @@ const server = http.createServer(async (req, res) => {
         if (!ctx && model && url.searchParams.get('load') === '1') {
           // Not in memory: load it (the bridge's cap if set, else LM Studio's saved settings) to learn its context.
           await ensureModelLoaded(model, () => {}).catch(() => {});
-          await fetch(cfg.lmStudioUrl + '/v1/chat/completions', {
+          await fetch(baseUrl(model) + '/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, max_tokens: 1, reasoning_effort: 'none', messages: [{ role: 'user', content: 'hi' }] }),
@@ -2011,6 +2043,8 @@ if (require.main === module) chats.init().then(() => hosts.adoptExisting()).then
   // This PC runs Claude Code sessions in its projects folder (turn off with "codeHost": false).
   if (cfg.codeHost !== false && cfg.projectsRootAbs)
     hosts.startLocalHost({ port: cfg.port, token: cfg.accessToken, root: cfg.projectsRootAbs, name: cfg.codeHostName || os.hostname() });
+  if (second.enabled) log(`Second model:     ${second.id} at ${second.url}`);
+  second.start();
   // Restart LM Studio if it stops (turn off with "watchLmStudio": false).
   if (cfg.watchLmStudio !== false) {
     watchLmStudio();
