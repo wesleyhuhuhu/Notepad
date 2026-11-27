@@ -1462,6 +1462,38 @@ async function handleWebSearch(req, res, body, tool) {
 const anthropicChars = (body) =>
   JSON.stringify(body.system || '').length + JSON.stringify(body.tools || []).length + JSON.stringify(body.messages || []).length;
 
+// Estimated prompt tokens of a Claude-format request. Images count as image tokens (~1 per
+// 32x32 pixels), not as the characters of their base64 data, which made a 5-message request with
+// screenshots look like 240k tokens.
+function anthropicTokens(body) {
+  let images = 0;
+  const strip = (k, v) => {
+    if (v && typeof v === 'object' && v.type === 'base64' && typeof v.data === 'string') {
+      images += imageTokens(`data:${v.media_type || 'image/png'};base64,${v.data.slice(0, 4096)}`);
+      return { type: 'base64' };
+    }
+    return v;
+  };
+  const chars = JSON.stringify(body.system || '').length + JSON.stringify(body.tools || []).length + JSON.stringify(body.messages || [], strip).length;
+  return Math.round(chars * tokensPerChar) + images;
+}
+
+// LM Studio's Claude-format usage counts the reused (cached) part of the prompt twice: its
+// input_tokens is the whole prompt, and cache_read_input_tokens repeats the cached part. In
+// Claude's API input_tokens is only the uncached part, and Claude Code adds the three up, so it
+// saw sessions at nearly twice their size and compacted every few calls (measured: 74,305
+// "used" for a 40,226-token prompt). Turns input_tokens back into the uncached part. Only when
+// input_tokens looks like the whole prompt (compared with the bridge's estimate), in case LM
+// Studio changes this.
+function fixAnthropicUsage(u, promptEstimate) {
+  if (!u || typeof u !== 'object' || typeof u.input_tokens !== 'number') return false;
+  const cached = (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  if (!cached || u.input_tokens < cached) return false;
+  if (promptEstimate && u.input_tokens < promptEstimate * 0.6) return false;
+  u.input_tokens -= cached;
+  return true;
+}
+
 async function handleAnthropic(req, res, route) {
   const body = await readJson(req, 64 * 1024 * 1024);
   const known = (await listModels().catch(() => [])).map((m) => m.id);
@@ -1471,22 +1503,11 @@ async function handleAnthropic(req, res, route) {
 
   if (route.endsWith('/count_tokens')) {
     // Estimate (LM Studio has no exact count endpoint), using the bridge's calibrated ratio.
-    return json(res, 200, { input_tokens: Math.round(anthropicChars(body) * tokensPerChar) });
+    return json(res, 200, { input_tokens: anthropicTokens(body) });
   }
 
   const searchTool = (body.tools || []).find(isWebSearchTool);
   if (searchTool) return handleWebSearch(req, res, body, searchTool);
-
-  // A website session's main calls (the ones with tools; side calls like titles have none):
-  // remember how big the conversation is, for switching it to a model with a smaller context.
-  const tag = String(req.headers['x-local-llm-chat'] || '');
-  if (tag && (body.tools || []).length && !route.endsWith('/count_tokens')) {
-    const chat = chats.chats.get(tag);
-    if (chat && chat.kind === 'code') {
-      chat.lastPrompt = { tokens: Math.round(anthropicChars(body) * tokensPerChar), at: Date.now() };
-      chats.saveSoon(chat);
-    }
-  }
 
   if (second.has(model)) {
     try {
@@ -1503,11 +1524,19 @@ async function handleAnthropic(req, res, route) {
   // Big screenshots would need more GPU memory than the model has left (bridge/images.js).
   const shrunk = await shrinkImages(body.messages).catch(() => 0);
   if (shrunk) log(`Claude Code: shrank ${shrunk} image${shrunk === 1 ? '' : 's'}`);
-  log(
-    `Claude Code: ${body.messages.length} messages, ${(body.tools || []).length} tools, ~${Math.round(
-      anthropicChars(body) * tokensPerChar
-    )} tokens -> ${model}`
-  );
+  const promptEstimate = anthropicTokens(body);
+  log(`Claude Code: ${body.messages.length} messages, ${(body.tools || []).length} tools, ~${promptEstimate} tokens -> ${model}`);
+
+  // A website session's main calls (the ones with tools; side calls like titles have none):
+  // remember how big the conversation is, for switching it to a model with a smaller context.
+  const tag = String(req.headers['x-local-llm-chat'] || '');
+  if (tag && (body.tools || []).length) {
+    const chat = chats.chats.get(tag);
+    if (chat && chat.kind === 'code') {
+      chat.lastPrompt = { tokens: promptEstimate, at: Date.now() };
+      chats.saveSoon(chat);
+    }
+  }
 
   const ac = new AbortController();
   res.on('close', () => {
@@ -1530,17 +1559,44 @@ async function handleAnthropic(req, res, route) {
     res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') || 'application/json' });
     return res.end(text);
   }
-  res.writeHead(200, {
-    'Content-Type': upstream.headers.get('content-type') || 'application/json',
-    'Cache-Control': 'no-cache, no-transform',
-    'X-Accel-Buffering': 'no',
-  });
+  const type = upstream.headers.get('content-type') || 'application/json';
+  res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+  if (!/event-stream/i.test(type)) {
+    // One JSON reply: correct its usage.
+    let text = await upstream.text().catch(() => '');
+    try {
+      const j = JSON.parse(text);
+      if (fixAnthropicUsage(j.usage, promptEstimate)) text = JSON.stringify(j);
+    } catch {}
+    return res.end(text);
+  }
+  // A stream: pass it on line by line, correcting the usage in message_start / message_delta.
+  const fixLine = (line) => {
+    if (!line.startsWith('data:') || !line.includes('"usage"')) return line;
+    try {
+      const ev = JSON.parse(line.slice(5));
+      const a = fixAnthropicUsage(ev.message && ev.message.usage, promptEstimate);
+      const b = fixAnthropicUsage(ev.usage, promptEstimate);
+      return a || b ? 'data: ' + JSON.stringify(ev) : line;
+    } catch {
+      return line;
+    }
+  };
+  const dec = new TextDecoder();
+  let buf = '';
   try {
-    for await (const chunk of upstream.body) res.write(chunk);
+    for await (const chunk of upstream.body) {
+      buf += dec.decode(chunk, { stream: true });
+      const cut = buf.lastIndexOf('\n') + 1;
+      if (cut > 0) {
+        res.write(buf.slice(0, cut).split('\n').map(fixLine).join('\n'));
+        buf = buf.slice(cut);
+      }
+    }
   } catch (e) {
     if (!ac.signal.aborted) log('Claude Code stream error: ' + e.message);
   }
-  res.end();
+  res.end(buf ? fixLine(buf + dec.decode()) : dec.decode());
 }
 
 // --------------------------------------------------------------- Note API ---

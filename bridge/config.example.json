@@ -27,7 +27,7 @@
     "gpu": "6800 XT",
     "port": 1235,
     "server": "../amd/llama.cpp/llama-server.exe",
-    "model": "../amd/models/Qwen3.8-9B-heretic-uncensored.Q6_K.gguf",
+    "model": "../amd/models/Qwen3.8-9B-heretic-uncensored.Q4_K_M.gguf",
     "context": 65536
   },
   "accessToken": ""

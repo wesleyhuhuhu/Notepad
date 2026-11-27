@@ -149,6 +149,8 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 
 **Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 29k with the 16,384 reply cap (launchers and website sessions). With the current 88k context that's about **59k**.
 
+**Token counts from LM Studio are corrected.** LM Studio reports the whole prompt as `input_tokens` and repeats the part it reused from its cache as `cache_read_input_tokens`. Claude Code adds them up, so before 2026-11-26 it saw sessions at nearly twice their size: 74,305 "used" for a 40,226-token prompt. It compacted at about half the real limit, and right after each compaction the next call looked full again, so it compacted every few calls (14 times in one session). The bridge now subtracts the reused part before passing the numbers on (`fixAnthropicUsage` in `bridge/server.js`). Checked: the same 6,524-token prompt sent again now reports 256 + 6,268 cached = 6,524, where it used to report 12,792. The website's context meter, which used the same numbers, is right too.
+
 The reply cap covers thinking too. At 8,192 a long think, for example while weighing several pages of web search results, could hit it ("API Error: Claude's response exceeded the 8192 output token maximum"), so the default is now 16,384. Measured earlier with a 55.3k context:
 
 | Reply cap | Free for work | Compacts at about |
@@ -264,7 +266,7 @@ While gaming, start with `.\start.ps1 -ContextLength 16384`. The bridge then tre
 
 The RTX 5070 Ti runs the 27B in LM Studio; the RX 6800 XT (which drives the screens and games) runs a smaller model at the same time, with room left for a game.
 
-- **What runs:** `Qwen3.8-9B-heretic-uncensored` Q6_K ([mradermacher's GGUF](https://huggingface.co/mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF)) with a 64k context, in llama.cpp's own `llama-server` (Vulkan build). LM Studio can't serve it: it runs one GGUF engine at a time, and that one is CUDA, which only sees the NVIDIA card.
+- **What runs:** `Qwen3.8-9B-heretic-uncensored` Q4_K_M ([mradermacher's GGUF](https://huggingface.co/mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF), 5.24 GB) with a 64k context, in llama.cpp's own `llama-server` (Vulkan build). LM Studio can't serve it: it runs one GGUF engine at a time, and that one is CUDA, which only sees the NVIDIA card.
 - **Where:** `amd\llama.cpp\` (the [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) `llama-bXXXXX-bin-win-vulkan-x64.zip`, unzipped) and `amd\models\`. The `amd` folder isn't in git.
 - **How it starts:** the bridge starts it (hidden, port 1235, local only) and checks it every 30 s, starting it again if it stops. Restarting the bridge restarts it too (~20 s to load); one that's already running is reused. Its output goes to `bridge\logs\second-model.log`. The card is found by name (`"gpu": "6800 XT"`), so device numbering doesn't matter.
 - **Loading and unloading:** it isn't in LM Studio, so LM Studio's eject button doesn't apply. Instead:
@@ -283,8 +285,17 @@ The RTX 5070 Ti runs the 27B in LM Studio; the RX 6800 XT (which drives the scre
   - **Claude Code sessions on the website:** pick the model in the session bar, next to the permission mode, or type `/model 9b` (`/model default` goes back). Claude Code fixes its model and context size when it starts, so the switch restarts the session's Claude Code on the new model with your next message and resumes the same conversation. If the conversation is past the point where Claude Code would compact on the new model (its context − ~23k), it's compacted first on the current model, shown as a `/compact` turn, and the switch happens when that finishes. For the 9B that point is ~42k tokens. To know the conversation's real size, each session tags its model calls (an `x-local-llm-chat` header) and the bridge records the size of the last one. `claude-local` in a terminal keeps using the 27B.
   - It can't see images (no vision file).
 - **Measured on the 6800 XT:**
-  - **VRAM:** ~9.5 GB (up to ~9.9 GB in use). That fits next to the desktop (~1 GB), but **not next to CS2 in a match**. Measured with CS2 in a match: CS2 6.1 GB, the ProtonVPN app 1.7 GB, Discord 0.9 GB. Windows gave the 9B only 6.6 GB and moved the other 3.3 GB into system RAM, which the card reads over the riser's PCIe 3.0 x8 link, far slower than VRAM. Before playing, closing the ProtonVPN window and turning off Discord's hardware acceleration frees ~2.6 GB, close to what's missing. Check with Task Manager → Performance → GPU 1: "Shared GPU memory" rising means it's spilling.
-  - **Speed:** ~60 tokens/s on a short chat, ~47 tokens/s at 23k tokens; reading the prompt runs at ~800 tokens/s.
+  - **Q6_K vs Q4_K_M** (measured 2026-11-26 with the game closed; the same 9 checks: math, a fact, JSON, a bug, logic, working code, a tool call, a code word hidden in ~20k tokens):
+
+    | | VRAM | Short reply | At ~20k tokens | Reading the prompt | Checks passed |
+    |---|---|---|---|---|---|
+    | Q6_K, 64k (before) | 9.5 GB | 60 tok/s | 47 tok/s | 793 tok/s | 8/9 |
+    | **Q4_K_M, 64k (now)** | **8.1 GB** | | | | |
+    | Q4_K_M, 32k | 6.5 GB | 74 tok/s | 56 tok/s | 940 tok/s | 8/9 |
+
+    Both missed the same arithmetic question. Q4_K_M at 64k has the same weights as at 32k, so it should run at about the same speed; only the memory differs.
+  - **Next to CS2:** the Q6_K didn't fit. Measured in a match: CS2 6.1 GB, the ProtonVPN app 1.7 GB, Discord 0.9 GB. Windows gave the 9B only 6.6 GB and moved the other 3.3 GB into system RAM, which the card reads over the riser's PCIe 3.0 x8 link, far slower than VRAM. Q4_K_M at 64k (8.1 GB) is still tight with all of those open. Closing the ProtonVPN window and turning off Discord's hardware acceleration frees ~2.6 GB. Check with Task Manager → Performance → the 6800 XT: "Shared GPU memory" rising means it's spilling.
+  - **Freezes:** on 2026-11-26 the PC froze twice when alt-tabbing out of CS2 while the Q6_K was loaded. The screen froze but audio kept playing, and it needed a hard restart. Windows recorded GPU timeouts (LiveKernelEvent 141) and an AMD driver hang report at both times. The likely cause is the overfilled card plus an AMD driver that fails to recover. **Unload the 9B before playing** (`.\second-model.ps1 off`).
   - **While a game runs on the same card, they compete.** Measured with CS2 open: the 9B read a long prompt at only 80–130 tokens/s, and the game loses frames while the 9B works. Short replies are fine; leave long prompts for when you're not playing. Capping the game's FPS leaves more room.
 - **Settings found by testing:**
   - Flash attention and a q8_0 KV cache both cut prompt reading on this card to 100–250 tokens/s at 20k+ tokens, so both are off.
