@@ -240,6 +240,9 @@ details.reasoning div {
 dialog .hint-top { font-size: 13.5px; color: var(--muted); margin: -4px 0 18px; line-height: 1.55; }
 .notice { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 8px; }
 .gen { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+/* The live status (reading / thinking / writing, tokens, tok/s) sits right above the message box. */
+.livebar { margin-bottom: 6px; padding: 0 4px; }
+.livebar[hidden] { display: none; }
 .gen::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); animation: pulse 1.2s ease-in-out infinite; flex: none; }
 .stats { color: var(--faint); font-size: 12px; margin-top: 10px; font-variant-numeric: tabular-nums; }
 .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent); }
@@ -560,6 +563,7 @@ dialog .row { margin-top: 22px; }
     </div>
     <div class="composer">
       <div class="slashpop" id="slashPop" role="listbox" aria-label="Commands" hidden></div>
+      <div class="inner livebar gen" id="liveBar" role="status" aria-live="polite" hidden></div>
       <div class="inner" id="tray"></div>
       <div class="inner box">
         <button id="attach" title="Attach images or a video" aria-label="Attach images or a video">
@@ -1140,6 +1144,7 @@ dialog .row { margin-top: 22px; }
       paintFrame = 0;
       for (const x of painting) repaint(x);
       painting.clear();
+      updateLiveBar();
       scrollDown();
     });
   }
@@ -1186,6 +1191,7 @@ dialog .row { margin-top: 22px; }
           scrollDown();
         }
         if (ev.kind === 'compact') compactEnded(ev);
+        updateLiveBar();
         updateSend();
         updateMeter();
         return;
@@ -1351,8 +1357,8 @@ dialog .row { margin-top: 22px; }
     const { reasoning: inlineR, content } = splitThink(m.content || '');
     const reasoning = [m.reasoning || '', inlineR].filter(Boolean).join('\n').trim();
 
-    v.notice.hidden = !(streaming && m.notice);
-    if (!v.notice.hidden) v.notice.textContent = m.notice;
+    // Status while it works (waiting, reading, thinking, writing) is shown above the message box.
+    v.notice.hidden = true;
 
     v.details.hidden = !reasoning;
     if (reasoning) {
@@ -1361,11 +1367,9 @@ dialog .row { margin-top: 22px; }
       const open = m.reasoningOpen !== undefined ? m.reasoningOpen : thinking;
       if (v.details.open !== open) v.details.open = open;
       if (reasoning !== v.reason) {
-        const rb = v.rbox;
-        const atEnd = rb.scrollHeight - rb.scrollTop - rb.clientHeight < 8;
-        rb.textContent = reasoning;
+        v.rbox.textContent = reasoning;
         v.reason = reasoning;
-        if (atEnd) rb.scrollTop = rb.scrollHeight;
+        followBox(v.rbox);
       }
     }
 
@@ -1393,9 +1397,7 @@ dialog .row { margin-top: 22px; }
     v.err.hidden = !m.error;
     if (m.error) v.err.textContent = m.error;
 
-    const live = streaming && m.gen ? genText(m.gen) : '';
-    v.gen.hidden = !live;
-    if (live) v.gen.textContent = live;
+    v.gen.hidden = true; // shown above the message box instead (updateLiveBar)
     const st = streaming ? '' : statsText(m.stats);
     v.stats.hidden = !st;
     if (st) v.stats.textContent = st;
@@ -1404,6 +1406,7 @@ dialog .row { margin-top: 22px; }
   function render() {
     const list = $('list');
     list.innerHTML = '';
+    updateLiveBar();
     if (isCode()) {
       list.appendChild(codeBar());
       if (!messages.length) {
@@ -1526,33 +1529,68 @@ dialog .row { margin-top: 22px; }
   }
 
   // ------------------------------------------------------------ scroll --
-  // Follow new output only while the user is at the bottom. Any upward scroll
-  // (wheel, touch, keys, scrollbar) stops following until they come back down.
+  // Follow new output while the user is at (or near) the bottom. Scrolling up stops following;
+  // scrolling back down near the bottom starts it again. "Near" is generous on purpose: text keeps
+  // arriving while you scroll down, so you rarely land exactly on the last pixel.
+  const STICK_PX = 64;
+  const distanceOf = (el) => el.scrollHeight - el.scrollTop - el.clientHeight;
+  // Our own scrolling only ever moves down, so any upward move is the user's.
+  function follower(el, onChange) {
+    const f = { on: true, lastTop: el.scrollTop };
+    const check = () => {
+      if (distanceOf(el) <= STICK_PX) f.on = true;
+      else if (el.scrollTop < f.lastTop - 1) f.on = false; // moved up
+      f.lastTop = el.scrollTop;
+      if (onChange) onChange();
+    };
+    el.addEventListener('scroll', check, { passive: true });
+    el.addEventListener('wheel', (e) => {
+      if (e.deltaY < 0) f.on = false;
+      else if (distanceOf(el) <= STICK_PX * 3) f.on = true;
+    }, { passive: true });
+    f.toBottom = () => {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) return;
+      el.scrollTop = el.scrollHeight;
+      f.lastTop = el.scrollTop;
+    };
+    return f;
+  }
   const box = $('messages');
-  let stick = true;
-  let touching = false;
-  const distance = () => box.scrollHeight - box.scrollTop - box.clientHeight;
-  const updateJump = () => { $('jump').hidden = distance() < 200; };
+  const updateJump = () => { $('jump').hidden = distanceOf(box) < 200; };
+  const page = follower(box, updateJump);
   function scrollDown(force) {
-    if (force) stick = true;
-    if (stick) box.scrollTop = box.scrollHeight;
+    if (force) page.on = true;
+    if (page.on) page.toBottom();
     updateJump();
   }
-  box.addEventListener('scroll', () => {
-    const d = distance();
-    if (d <= 4 && !touching) stick = true;
-    else if (d > 40) stick = false;
-    updateJump();
-  }, { passive: true });
-  box.addEventListener('wheel', (e) => { if (e.deltaY < 0) stick = false; }, { passive: true });
-  box.addEventListener('touchstart', () => { touching = true; }, { passive: true });
-  box.addEventListener('touchmove', () => { stick = false; }, { passive: true });
-  box.addEventListener('touchend', () => { touching = false; if (distance() <= 4) stick = true; }, { passive: true });
-  box.addEventListener('keydown', (e) => { if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) stick = false; });
+  box.addEventListener('keydown', (e) => {
+    if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) page.on = false;
+    if (e.key === 'End') page.on = true;
+  });
   $('jump').addEventListener('click', () => {
-    stick = true;
+    page.on = true;
     box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
   });
+  // A Thinking box (it scrolls on its own): keeps following its newest text the same way.
+  function followBox(el) {
+    if (!el._follow) el._follow = follower(el);
+    if (el._follow.on) el._follow.toBottom();
+  }
+
+  // What the open chat's reply is doing right now, above the message box, so it's always in view.
+  function updateLiveBar() {
+    const bar = $('liveBar');
+    let text = '';
+    if (chat && chat.run) {
+      const m = chat.run.messageId ? byId(chat.run.messageId) : null;
+      if (chat.run.kind === 'compact') text = 'Compacting the conversation…';
+      else if (m && m.blocks) {
+        text = m.notice || (m.blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : genText(m.gen) || 'Working…');
+      } else if (m) text = m.notice || genText(m.gen) || (chat.run.state === 'queued' ? 'Waiting for the model…' : 'Starting…');
+    }
+    bar.hidden = !text;
+    if (text && bar.textContent !== text) bar.textContent = text;
+  }
 
   // ------------------------------------------------------- compaction --
   // What gets sent: the latest summary (if any) plus the messages after it that aren't compacted.
@@ -2295,8 +2333,7 @@ dialog .row { margin-top: 22px; }
       el.append(v.notice, v.blocks, v.err, v.foot);
     }
     const blocks = m.blocks || [];
-    v.notice.hidden = !streaming;
-    if (streaming) v.notice.textContent = m.notice || (blocks.some((b) => b.type === 'permission' && b.state === 'pending') ? 'Waiting for your approval…' : genText(m.gen) || 'Working…');
+    v.notice.hidden = true; // the status while it works is shown above the message box (updateLiveBar)
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
       let it = v.items[i];
@@ -2323,7 +2360,7 @@ dialog .row { margin-top: 22px; }
         it.el.classList.toggle('cursor', last);
       } else if (b.type === 'thinking') {
         it.sum.textContent = last ? 'Thinking…' : 'Thinking';
-        if (it.key !== b.text) { it.key = b.text; it.box.textContent = b.text; }
+        if (it.key !== b.text) { it.key = b.text; it.box.textContent = b.text; followBox(it.box); }
       } else if (b.type === 'tool') {
         it.el.className = 'blk-tool ' + (b.ok === undefined ? 'pending' : b.ok ? 'ok' : 'bad');
         it.sum.textContent = toolLine(b.name, b.input);
