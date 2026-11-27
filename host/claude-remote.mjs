@@ -172,10 +172,12 @@ async function startSession(chatId, cmd) {
   const { model, ctx } = await modelInfo(cmd.model);
   // Claude Code auto-compacts at (declared context − reply cap − ~13k it reserves). Telling it the
   // window is a little larger than the model's real `ctx` shrinks that reserve, so sessions compact
-  // later — without loading more, so no speed or VRAM cost. The real limit is still `ctx`, so a turn
-  // that overflows it is rejected by LM Studio; keep the extra modest. RESERVE is the margin left
-  // beyond the reply cap once compaction triggers (default 7k; raise it if you see overflow errors).
-  const RESERVE = Number(process.env.CLAUDE_REMOTE_RESERVE_TOKENS) || 7000;
+  // later — without loading more, so no speed or VRAM cost. The real limit is still `ctx`: a turn
+  // that overflows it isn't rejected, LM Studio silently cuts the middle of the conversation
+  // ("truncateMiddle"), so keep the extra modest. RESERVE is the margin left beyond the reply cap once
+  // compaction triggers. Default 3k: with an 88k context that compacts at ~68.7k, and the worst case
+  // (68.7k sent + a full 16,384-token reply) is ~85k. Raise it if replies get cut off.
+  const RESERVE = Number(process.env.CLAUDE_REMOTE_RESERVE_TOKENS) || 3000;
   const overDeclare = Math.max(0, Math.min(10000, 13000 - RESERVE));
   const env = {
     ...process.env,

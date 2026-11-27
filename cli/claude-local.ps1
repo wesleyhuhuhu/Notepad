@@ -12,7 +12,7 @@
     claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
     claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
     claude-local --max-output 12000      longest reply, thinking included (default 16384)
-    claude-local --reserve 7000          tokens kept free before auto-compaction (default 7000; lower compacts later)
+    claude-local --reserve 3000          tokens kept free before auto-compaction (default 3000; lower compacts later)
     claude-local --setup                 change the saved address or token
 
   If PowerShell blocks the script, run claude-local.cmd instead, or:
@@ -25,7 +25,7 @@ $cfgFile = Join-Path $cfgDir 'config.json'
 $coreTools = 'Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch'
 
 # --- our own options (double-dash, so they never clash with claude's short flags) ---
-$setup = $false; $allTools = $false; $context = 0; $maxOutput = 16384; $reserve = 7000
+$setup = $false; $allTools = $false; $context = 0; $maxOutput = 16384; $reserve = 3000
 $pass = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch ($args[$i]) {
@@ -98,8 +98,8 @@ try {
   Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
   foreach ($v in $modelVars) { Set-Item "Env:$v" $model }
   # Declare a little more than the real context so Claude Code's ~13k auto-compact reserve shrinks
-  # to $reserve (default 7k), compacting later. The real model limit is still $ctx, so keep it modest;
-  # a turn that overflows $ctx is still rejected by LM Studio. See host/claude-remote.mjs.
+  # to $reserve (default 3k), compacting later. The real model limit is still $ctx, so keep it modest;
+  # a turn that overflows $ctx makes LM Studio silently cut the middle of the conversation. See host/claude-remote.mjs.
   $over = [Math]::Max(0, [Math]::Min(10000, 13000 - $reserve))
   $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "$($ctx + $over)"
   # reply cap 16384 leaves room for long thinking; auto-compact fires at about ctx - maxOutput - reserve.

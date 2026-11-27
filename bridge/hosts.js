@@ -194,8 +194,8 @@ module.exports = function createHosts(d) {
   // the same conversation (from the next message). If the conversation is past the point where
   // Claude Code would compact on the new model, it is compacted on the current model first, as
   // its own turn, and the switch happens when that turn finishes.
-  // Claude Code compacts at about context − 16,384 (reply cap) − 7,000 (claude-remote's reserve).
-  const COMPACT_MARGIN = 16384 + 7000;
+  // Claude Code compacts at about context − 16,384 (reply cap) − 3,000 (claude-remote's reserve).
+  const COMPACT_MARGIN = 16384 + 3000;
 
   // How big the conversation is now: the size of its last model call (recorded by the bridge
   // from the call itself, server.js handleAnthropic) or what the latest turn reported, whichever

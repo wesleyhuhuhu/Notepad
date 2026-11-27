@@ -129,7 +129,7 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 | `--all-tools` | Every Claude Code tool. By default only Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch are sent, which keeps the setup at ~5.3k tokens instead of ~16.5k. |
 | `--max-output N` | Longest reply, thinking included (default 16384). Lower leaves more room before compaction; higher allows longer thinking. |
 | `--context N` | Tell Claude Code a smaller context than the loaded model's. |
-| `--reserve N` | Tokens kept free before Claude Code auto-compacts (default 7000). Lower compacts later, but a turn that overflows the real context is rejected. |
+| `--reserve N` | Tokens kept free before Claude Code auto-compacts, beyond room for one full reply (default 3000). Lower compacts later. But if a turn overflows the real context, LM Studio silently cuts the middle of the conversation, so don't go much lower. |
 | `--setup` | Change the saved address or token. |
 
 **How it works:**
@@ -147,7 +147,9 @@ Both are saved (Windows: `%APPDATA%\claude-local\config.json`, macOS/Linux: `~/.
 - **Cost:** Exa's free balance is $10 a month. With the defaults (`"webSearchType": "auto"`, 8 results, 1,500-character excerpts) a search costs about $0.007, so roughly 1,400 searches a month; `"lite"` costs about $0.004. The bridge window logs each search with its cost.
 - **Other services:** `"webSearchProvider"` picks the service. `exa` is the only one so far; others can be added to `searchProviders` in `bridge/server.js`.
 
-**Room to work.** Claude Code keeps room for one full reply plus about 13k before it compacts, so it compacts at about the context minus 29k with the 16,384 reply cap (launchers and website sessions). With the current 88k context that's about **59k**.
+**Room to work.** Claude Code compacts once the next request would pass its declared context minus its reply cap (16,384) minus ~13k of its own margin. The launchers and website sessions declare the real context plus 10k, which leaves a ~3k reserve. With the current 88k context, sessions compact at about **68.7k**: the size of the next request, conversation plus new tool results. The website's meter shows only the last call's prompt, so it reads a few thousand lower.
+- Worst case: 68.7k sent + a full 16,384-token reply = ~85k, inside the real 88,064. Until 2026-11-27 the reserve was 7k, which compacted at ~64.7k (the meter showed ~60k).
+- Later than this isn't safe without a smaller reply cap. A turn that overflows doesn't fail: LM Studio silently cuts the middle of the conversation ("truncateMiddle"). Replies in a real session reached 11.9k tokens.
 
 **Token counts from LM Studio are corrected.** LM Studio reports the whole prompt as `input_tokens` and repeats the part it reused from its cache as `cache_read_input_tokens`. Claude Code adds them up, so before 2026-11-26 it saw sessions at nearly twice their size: 74,305 "used" for a 40,226-token prompt. It compacted at about half the real limit, and right after each compaction the next call looked full again, so it compacted every few calls (14 times in one session). The bridge now subtracts the reused part before passing the numbers on (`fixAnthropicUsage` in `bridge/server.js`). Checked: the same 6,524-token prompt sent again now reports 256 + 6,268 cached = 6,524, where it used to report 12,792. The website's context meter, which used the same numbers, is right too.
 
@@ -190,7 +192,7 @@ The **Claude Code** button starts a Claude Code session on one of your computers
   - **Allow file changes and commands (no approvals):** it works on its own. Use it in folders you don't mind it changing.
   - In every mode, web searches and page reads never ask, reading files never asks, and anything outside the session's folder still asks.
 - **Attachments:** the paperclip (or paste or drag) takes images, videos and any other file, up to 10 MB each and 25 MB per message. Images and video frames go to the model directly. Other files are saved in the session's folder under `uploads/` (never overwriting) and Claude Code is told where they are.
-- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 23k tokens before the end: its 16,384-token reply cap plus a ~7k reserve. The reserve is set by telling Claude Code the window is a little larger than the model's real context (`CLAUDE_REMOTE_RESERVE_TOKENS`, default 7000); lowering the reserve compacts later but risks a turn overflowing the real context.
+- **Context meter:** shows how much of the context the session's last model call used. Claude Code compacts the session by itself about 19k tokens before the end: its 16,384-token reply cap plus a ~3k reserve (~68.7k at an 88k context). The reserve is set by telling Claude Code the window is a little larger than the model's real context (`CLAUDE_REMOTE_RESERVE_TOKENS`, default 3000). Lowering the reserve compacts later, but risks a turn overflowing the real context, which LM Studio handles by silently cutting the middle of the conversation.
 - **Keeps working:** the session continues while the page is closed. The chat list shows an orange dot while it waits for you.
 - **Stop and resume:** **Stop** interrupts it. If that computer or the bridge restarts, the next message resumes the same session with its memory.
 - **Tools:** sessions get Read, Edit, Write, Bash, Grep, Glob, WebFetch and WebSearch, with the same model settings as `claude-local`.

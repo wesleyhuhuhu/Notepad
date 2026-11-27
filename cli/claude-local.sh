@@ -13,7 +13,7 @@
 #   claude-local --all-tools             every Claude Code tool (~16.5k tokens of setup instead of ~5.3k)
 #   claude-local --context 32768         tell Claude Code a smaller context than the loaded model's
 #   claude-local --max-output 12000      longest reply, thinking included (default 16384)
-#   claude-local --reserve 7000          tokens kept free before auto-compaction (default 7000; lower compacts later)
+#   claude-local --reserve 3000          tokens kept free before auto-compaction (default 3000; lower compacts later)
 #   claude-local --setup                 change the saved address or token
 #
 # Install:  mkdir -p ~/bin && cp claude-local.sh ~/bin/claude-local && chmod +x ~/bin/claude-local
@@ -23,14 +23,14 @@ CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-local"
 CFG_FILE="$CFG_DIR/config"
 CORE_TOOLS="Bash,Edit,Glob,Grep,Read,Write,WebFetch,WebSearch"
 
-setup=0; all_tools=0; context=0; max_output=16384; reserve=7000; pass=()
+setup=0; all_tools=0; context=0; max_output=16384; reserve=3000; pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --setup) setup=1 ;;
     --all-tools) all_tools=1 ;;
     --context) shift; context="${1:-0}" ;;
     --max-output) shift; max_output="${1:-16384}" ;;
-    --reserve) shift; reserve="${1:-7000}" ;;
+    --reserve) shift; reserve="${1:-3000}" ;;
     *) pass+=("$1") ;;
   esac
   shift
@@ -88,8 +88,8 @@ for v in ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_M
   export "$v=$model"
 done
 # Declare a little more than the real context so Claude Code's ~13k auto-compact reserve shrinks to
-# $reserve (default 7k), compacting later. The real model limit is still $ctx, so keep it modest; a
-# turn that overflows $ctx is still rejected by LM Studio. See host/claude-remote.mjs.
+# $reserve (default 3k), compacting later. The real model limit is still $ctx, so keep it modest; a
+# turn that overflows $ctx makes LM Studio silently cut the middle of the conversation. See host/claude-remote.mjs.
 over=$(( 13000 - reserve )); if [ "$over" -lt 0 ]; then over=0; elif [ "$over" -gt 10000 ]; then over=10000; fi
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$(( ctx + over ))"
 # reply cap 16384 leaves room for long thinking; auto-compact fires at about ctx - max_output - reserve.
